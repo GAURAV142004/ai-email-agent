@@ -1,37 +1,23 @@
-export function buildEmailAnalysisPrompt(subject: string, threadContent: string): string {
-  return `Respond ONLY with valid JSON. Do not wrap in markdown code fences. No explanation before or after the JSON object.
+export function buildEmailAnalysisPrompt(
+  subject: string,
+  threadContent: string
+): string {
+  return `Analyze this business email. Reply with JSON only.
 
-You are an AI assistant that analyzes email threads and extracts actionable tasks.
+Subject: ${subject}
 
-Analyze the following email thread and respond with ONLY a valid JSON object.
-No markdown, no explanation, just raw JSON.
-
-Email Subject: ${subject}
-
-Email Thread:
 ${threadContent}
 
-Respond with this exact JSON structure:
+JSON:
 {
-  "summary": "2-3 sentence summary of the email thread",
-  "requires_action": true or false,
-  "priority": "high" | "medium" | "low",
-  "tasks": [
-    {
-      "task": "Clear, specific action item",
-      "priority": "high" | "medium" | "low",
-      "due_date": "YYYY-MM-DD or null if not mentioned",
-      "assigned_to": "person name/email or null"
-    }
-  ]
+  "summary": "1-2 sentences",
+  "requires_action": true|false,
+  "priority": "high"|"medium"|"low",
+  "tasks": [{"task": "action", "priority": "high"|"medium"|"low", "due_date": "YYYY-MM-DD or null"}]
 }
 
-Rules:
-- requires_action = false if it's a newsletter, notification, or no reply needed
-- Extract ALL actionable items as separate task objects
-- Be specific in task descriptions — include names, dates, amounts from the email
-- Infer due dates from phrases like "by Friday", "end of week", "urgent"
-- If no tasks, return empty array []`
+high=urgent/deadline, medium=needs reply, low=fyi.
+requires_action=false for automated/newsletter/receipt.`
 }
 
 export function buildFollowUpDraftPrompt(

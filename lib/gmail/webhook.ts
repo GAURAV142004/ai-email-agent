@@ -3,6 +3,21 @@ import { fetchNewMessages, fetchThread } from './thread'
 import { analyzeEmailThread } from '@/lib/ai/analyze'
 import { safeDecrypt } from '@/lib/crypto'
 import { processThreadMessages } from './message-processor'
+import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
+
+const memberAICallCount = new Map<string, { count: number; resetAt: number }>()
+
+function checkMemberAIRateLimit(id: string): boolean {
+  const now = Date.now()
+  const e   = memberAICallCount.get(id)
+  if (!e || now > e.resetAt) {
+    memberAICallCount.set(id, { count: 1, resetAt: now + 3_600_000 })
+    return true
+  }
+  if (e.count >= 20) return false
+  e.count++
+  return true
+}
 
 export interface PubSubMessage {
   emailAddress: string
@@ -81,6 +96,37 @@ export async function processWebhookNotification(notification: PubSubMessage): P
       if (existing) {
         // Thread exists — process any new messages (e.g. a reply arrived)
         await processThreadMessages(existing.id, notification.emailAddress, thread.messages, memberRow?.id ?? '')
+        continue
+      }
+
+      // Pre-filter check
+      const preFilter = shouldSkipAIAnalysis(
+        thread.fromEmail ?? '',
+        thread.subject   ?? '',
+        thread.fullText?.slice(0, 500) ?? ''
+      )
+
+      if (preFilter.skip) {
+        await supabase.from('email_threads').upsert({
+          user_id:         userId,
+          owner_member_id: memberRow?.id ?? null,
+          thread_id:       threadId,
+          subject:         thread.subject,
+          from_email:      thread.fromEmail,
+          received_at:     thread.receivedAt,
+          email_link:      `https://mail.google.com/mail/u/0/#inbox/${threadId}`,
+          summary:         'Automated — no action needed',
+          reply_status:    'no_reply_needed',
+          processed_at:    new Date().toISOString(),
+          pii_was_masked:  false,
+          pii_types_found: [],
+        }, { onConflict: 'thread_id' })
+        continue
+      }
+
+      // Rate limit check
+      if (!checkMemberAIRateLimit(memberRow?.id ?? '')) {
+        console.error(`Rate limit hit for ${thread.fromEmail}`)
         continue
       }
 

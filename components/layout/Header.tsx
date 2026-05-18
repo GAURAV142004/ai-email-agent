@@ -14,6 +14,7 @@ import {
 import { LogOut, Settings, User, Sun, Moon, Menu } from 'lucide-react'
 import { TeamRole, ROLE_LABELS, ROLE_COLORS } from '@/lib/roles'
 import { useMobileSidebar } from './DashboardShell'
+import { NotificationBell } from '@/components/dashboard/NotificationBell'
 
 interface HeaderProps {
   title: string
@@ -71,6 +72,9 @@ export function Header({ title, subtitle }: HeaderProps) {
             {role && <RoleTag role={role} />}
           </div>
         )}
+
+        {/* Notification bell */}
+        <NotificationBell />
 
         {/* Theme toggle */}
         <button

@@ -46,11 +46,26 @@ async function callGeminiWithBackoff<T>(
   throw new Error('callGeminiWithBackoff: exhausted retries')
 }
 
+function truncateThreadForAI(text: string): string {
+  const MAX = 3000
+  if (text.length <= MAX) return text
+  const msgs = text.split(
+    /(?:On .+wrote:|From:.+\nTo:|----+Original)/i
+  )
+  if (msgs.length <= 1)
+    return text.slice(0, MAX) + '\n[truncated]'
+  const combined = `${msgs[0]}\n[...]\n${msgs.slice(-2).join('\n---\n')}`
+  return combined.length <= MAX
+    ? combined
+    : combined.slice(0, MAX) + '\n[truncated]'
+}
+
 export async function analyzeEmailThread(
   threadContent: string,
   subject: string
 ): Promise<EmailAnalysisResult> {
-  const maskResult: MaskResult = maskPII(threadContent)
+  const truncated  = truncateThreadForAI(threadContent)
+  const maskResult: MaskResult = maskPII(truncated)
 
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',

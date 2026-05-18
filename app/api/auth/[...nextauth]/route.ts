@@ -42,10 +42,13 @@ export const authOptions: NextAuthOptions = {
         const supabase = getServiceClient()
         const { data: member } = await supabase
           .from('team_members')
-          .select('role')
+          .select('id, role, name')
           .eq('email', token.email ?? '')
           .single()
-        if (member) token.role = member.role
+        if (member) {
+          token.role       = member.role
+          token.memberName = member.name
+        }
       }
       return token
     },
@@ -65,6 +68,9 @@ export const authOptions: NextAuthOptions = {
           session.user.memberId = member.id
           session.user.role = member.role as TeamRole
         }
+      }
+      if (token.memberName) {
+        session.user.name = token.memberName as string
       }
       return session
     },

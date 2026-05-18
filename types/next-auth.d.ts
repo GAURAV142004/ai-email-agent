@@ -18,5 +18,6 @@ declare module 'next-auth/jwt' {
     refreshToken?: string
     googleId?: string
     role?: string
+    memberName?: string
   }
 }

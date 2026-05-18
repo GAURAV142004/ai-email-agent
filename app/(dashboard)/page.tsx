@@ -15,7 +15,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { createClient } from '@/lib/supabase/client'
 import type { Task, TaskStatus, ThreadWithMember } from '@/lib/supabase/types'
-import { Copy, RefreshCw, Inbox, Sparkles, CheckCircle, Clock, BarChart2, AlertCircle, Hourglass } from 'lucide-react'
+import { Copy, RefreshCw, Search, Sparkles, CheckCircle, Clock, BarChart2, AlertCircle, Hourglass } from 'lucide-react'
+import { GmailSearchPanel } from '@/components/dashboard/GmailSearchPanel'
 import { TaskDetailPanel } from '@/components/dashboard/TaskDetailPanel'
 import { ReplyComposer } from '@/components/dashboard/ReplyComposer'
 import { cn } from '@/lib/utils'
@@ -152,20 +153,10 @@ export default function DashboardPage() {
   const [followUpTask, setFollowUpTask] = useState<Task | null>(null)
   const [followUpDraft, setFollowUpDraft] = useState<{ subject: string; body: string } | null>(null)
   const [generatingDraft, setGeneratingDraft] = useState(false)
-  const [syncing, setSyncing] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
   const [replyThread, setReplyThread] = useState<ThreadWithMember | null>(null)
-
-  const syncEmails = async () => {
-    setSyncing(true)
-    try {
-      await fetch('/api/gmail/sync', { method: 'POST' })
-      await fetchTasks()
-    } finally {
-      setSyncing(false)
-    }
-  }
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -313,15 +304,10 @@ export default function DashboardPage() {
               variant="outline"
               size="sm"
               className="h-8 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-blue-50 dark:hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-200 dark:hover:border-blue-500/40 transition-all duration-200 px-3 rounded-lg text-sm"
-              onClick={syncEmails}
-              disabled={syncing}
+              onClick={() => setSearchOpen(true)}
             >
-              {syncing ? (
-                <RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-              ) : (
-                <Inbox className="w-3.5 h-3.5 mr-1.5" />
-              )}
-              {syncing ? 'Syncing…' : 'Sync Inbox'}
+              <Search className="w-3.5 h-3.5 mr-1.5" />
+              Search Inbox
             </Button>
 
             <span className="text-xs text-slate-400 dark:text-slate-500 pl-2.5 border-l border-slate-200 dark:border-slate-700">
@@ -361,6 +347,8 @@ export default function DashboardPage() {
           onReplySent={() => { setReplyThread(null); fetchTasks() }}
         />
       )}
+
+      <GmailSearchPanel open={searchOpen} onClose={() => setSearchOpen(false)} />
 
       {/* Follow-up dialog */}
       <Dialog open={!!followUpTask} onOpenChange={() => { setFollowUpTask(null); setCopied(false) }}>

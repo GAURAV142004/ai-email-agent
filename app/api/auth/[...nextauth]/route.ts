@@ -38,7 +38,7 @@ export const authOptions: NextAuthOptions = {
         token.refreshToken = account.refresh_token
         token.googleId = (profile as any)?.sub
       }
-      if (trigger === 'signIn' || trigger === 'update') {
+      if (trigger === 'signIn' || trigger === 'update' || !token.memberName) {
         const supabase = getServiceClient()
         const { data: member } = await supabase
           .from('team_members')
@@ -48,29 +48,18 @@ export const authOptions: NextAuthOptions = {
         if (member) {
           token.role       = member.role
           token.memberName = member.name
+          token.memberId   = member.id
         }
       }
       return token
     },
     async session({ session, token }) {
-      session.accessToken = token.accessToken
+      session.accessToken  = token.accessToken
       session.refreshToken = token.refreshToken
-
-      if (session.user?.email) {
-        const supabase = getServiceClient()
-        const { data: member } = await supabase
-          .from('team_members')
-          .select('id, role')
-          .eq('email', session.user.email)
-          .single()
-
-        if (member) {
-          session.user.memberId = member.id
-          session.user.role = member.role as TeamRole
-        }
-      }
-      if (token.memberName) {
-        session.user.name = token.memberName as string
+      if (session.user) {
+        if (token.memberName) session.user.name     = token.memberName as string
+        if (token.role)       session.user.role     = token.role as TeamRole
+        if (token.memberId)   session.user.memberId = token.memberId as string
       }
       return session
     },

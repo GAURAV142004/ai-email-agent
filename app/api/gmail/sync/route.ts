@@ -83,8 +83,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             summary:          analysis.summary,
             email_link:       thread.emailLink,
             processed_at:     new Date().toISOString(),
-            pii_was_masked:   analysis._pii?.wasMasked ?? false,
-            pii_types_found:  analysis._pii?.detectedTypes ?? [],
+            pii_was_masked:   analysis.piiItemsFound > 0,
+            pii_types_found:  [],
           })
           .select('id')
           .single()
@@ -97,12 +97,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         await supabase.from('ai_logs').insert({
           thread_id: storedThread.id,
           user_id: user.id,
-          model_used: 'gemini-2.5-flash',
+          model_used: 'claude-3-haiku',
           response: JSON.stringify(analysis),
-          pii_items_found: analysis._pii?.itemsRemoved ?? 0,
+          pii_items_found: analysis.piiItemsFound,
         })
 
-        if (analysis.requires_action && analysis.tasks.length > 0) {
+        if (analysis.requiresAction && analysis.tasks.length > 0) {
           await supabase.from('tasks').insert(
             analysis.tasks.map((task) => ({
               thread_id: storedThread.id,
@@ -110,7 +110,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               task: task.task,
               priority: task.priority,
               due_date: task.due_date,
-              assigned_to: task.assigned_to,
+              assigned_to: null,
               status: 'pending' as const,
             }))
           )
@@ -121,8 +121,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         console.error(`Failed to process thread ${msg.threadId}:`, err)
       }
 
-      // Stay under the 15 RPM free-tier limit for gemini-1.5-flash
-      await sleep(4000)
+      await sleep(1000)
     }
 
     return NextResponse.json({ ok: true, processed, skipped })

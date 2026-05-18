@@ -19,6 +19,14 @@ function checkMemberAIRateLimit(id: string): boolean {
   return true
 }
 
+// Extract just the email address from "Display Name <email@domain.com>" format
+function extractEmailAddress(from: string): string {
+  if (!from) return ''
+  const match = from.match(/<([^>]+)>/)
+  if (match) return match[1].toLowerCase()
+  return from.toLowerCase().trim()
+}
+
 export interface PubSubMessage {
   emailAddress: string
   historyId: string
@@ -100,13 +108,19 @@ export async function processWebhookNotification(notification: PubSubMessage): P
       }
 
       // Pre-filter check
+      const rawFrom   = thread.fromEmail ?? ''
+      const cleanFrom = extractEmailAddress(rawFrom)
+
       const preFilter = shouldSkipAIAnalysis(
-        thread.fromEmail ?? '',
+        cleanFrom,
         thread.subject   ?? '',
         thread.fullText?.slice(0, 500) ?? ''
       )
 
       if (preFilter.skip) {
+        console.error(
+          `[PRE-FILTER] Skipped: ${cleanFrom} | ${thread.subject?.slice(0, 50)}`
+        )
         await supabase.from('email_threads').upsert({
           user_id:         userId,
           owner_member_id: memberRow?.id ?? null,
@@ -146,8 +160,8 @@ export async function processWebhookNotification(notification: PubSubMessage): P
           summary:          analysis.summary,
           email_link:       thread.emailLink,
           processed_at:     new Date().toISOString(),
-          pii_was_masked:   analysis._pii?.wasMasked ?? false,
-          pii_types_found:  analysis._pii?.detectedTypes ?? [],
+          pii_was_masked:   analysis.piiItemsFound > 0,
+          pii_types_found:  [],
         })
         .select('id')
         .single()
@@ -161,20 +175,20 @@ export async function processWebhookNotification(notification: PubSubMessage): P
       await supabase.from('ai_logs').insert({
         thread_id: storedThread.id,
         user_id: userId,
-        model_used: 'gemini-2.5-flash',
+        model_used: 'claude-3-haiku',
         response: JSON.stringify(analysis),
-        pii_items_found: analysis._pii?.itemsRemoved ?? 0,
+        pii_items_found: analysis.piiItemsFound,
       })
 
       // Store extracted tasks
-      if (analysis.requires_action && analysis.tasks.length > 0) {
+      if (analysis.requiresAction && analysis.tasks.length > 0) {
         const tasks = analysis.tasks.map((task) => ({
           thread_id: storedThread.id,
           user_id: userId,
           task: task.task,
           priority: task.priority,
           due_date: task.due_date,
-          assigned_to: task.assigned_to,
+          assigned_to: null,
           status: 'pending' as const,
         }))
 

@@ -19,5 +19,6 @@ declare module 'next-auth/jwt' {
     googleId?: string
     role?: string
     memberName?: string
+    memberId?: string
   }
 }

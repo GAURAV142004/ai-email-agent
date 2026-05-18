@@ -64,8 +64,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const threadContext = (thread as any).summary ?? ''
   const draft = await generateFollowUpDraft(
-    (thread as any).subject ?? '',
     threadContext,
+    (thread as any).subject ?? '',
     taskDescription
   )
 

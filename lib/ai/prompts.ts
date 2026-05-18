@@ -23,12 +23,11 @@ requires_action=false for automated/newsletter/receipt.`
 export function buildFollowUpDraftPrompt(
   subject: string,
   threadContent: string,
-  taskDescription: string
+  instructions?: string
 ): string {
   return `You are a professional email assistant. Draft a concise follow-up email.
 
-Original Subject: ${subject}
-Task to follow up on: ${taskDescription}
+Original Subject: ${subject}${instructions ? `\nInstructions: ${instructions}` : ''}
 
 Original Thread:
 ${threadContent}

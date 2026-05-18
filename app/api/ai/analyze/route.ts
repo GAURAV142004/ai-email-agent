@@ -33,8 +33,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const draft = await generateFollowUpDraft(
-      parsed.data.subject,
       parsed.data.threadContent,
+      parsed.data.subject,
       parsed.data.taskDescription
     )
     return NextResponse.json({ draft })

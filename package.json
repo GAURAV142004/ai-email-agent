@@ -11,8 +11,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.96.0",
     "@auth/supabase-adapter": "^1.11.2",
+    "@aws-sdk/client-bedrock-runtime": "^3.1048.0",
     "@base-ui/react": "^1.4.1",
-    "@google/generative-ai": "^0.24.1",
     "@supabase/ssr": "^0.10.3",
     "@supabase/supabase-js": "^2.105.4",
     "@tanstack/react-table": "^8.21.3",

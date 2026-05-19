@@ -238,7 +238,36 @@
 }
 
 /* ─── Scrollbar ──────────────────────────────────────────── */
-::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar       { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: oklch(0.82 0 0); border-radius: 999px; }
+::-webkit-scrollbar-thumb { background: oklch(0.7 0 0 / 0.3); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(0.6 0 0 / 0.5); }
 .dark ::-webkit-scrollbar-thumb { background: oklch(0.30 0.02 255); }
+
+/* ─── Professional UI utilities ─────────────────────────── */
+@keyframes pageEnter {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@layer utilities {
+  .page-enter { animation: pageEnter 0.2s ease-out; }
+
+  .card-hover {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .card-hover:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 20px oklch(0 0 0 / 0.08);
+  }
+}
+
+/* Professional button transitions */
+button, [role="button"] {
+  transition: all 0.15s ease;
+}
+
+/* Better input focus rings */
+input:focus, textarea:focus {
+  box-shadow: 0 0 0 3px oklch(0.6 0.2 250 / 0.15);
+}

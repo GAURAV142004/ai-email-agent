@@ -1,7 +1,18 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Search, X, ExternalLink, Loader2, Clock, Mail } from 'lucide-react'
+import {
+  Sheet, SheetContent, SheetHeader,
+  SheetTitle, SheetDescription
+} from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  Search, ExternalLink, Loader2,
+  Mail, Clock, MessageSquareReply,
+} from 'lucide-react'
+import { formatDistanceToNow } from 'date-fns'
+import { cn } from '@/lib/utils'
 
 interface GmailSearchResult {
   id:        string
@@ -15,11 +26,12 @@ interface GmailSearchResult {
 }
 
 interface Props {
-  open:    boolean
-  onClose: () => void
+  open:     boolean
+  onClose:  () => void
+  onReply?: (threadId: string, subject: string, from: string) => void
 }
 
-export function GmailSearchPanel({ open, onClose }: Props) {
+export function GmailSearchPanel({ open, onClose, onReply }: Props) {
   const [query,    setQuery]    = useState('')
   const [results,  setResults]  = useState<GmailSearchResult[]>([])
   const [loading,  setLoading]  = useState(false)
@@ -29,7 +41,7 @@ export function GmailSearchPanel({ open, onClose }: Props) {
 
   useEffect(() => {
     if (open) {
-      setTimeout(() => inputRef.current?.focus(), 100)
+      setTimeout(() => inputRef.current?.focus(), 150)
       setQuery('')
       setResults([])
       setSearched(false)
@@ -63,7 +75,6 @@ export function GmailSearchPanel({ open, onClose }: Props) {
         .replace(/after:\S+/gi, '')
         .replace(/before:\S+/gi, '')
         .trim()
-
       if (freeText) params.set('q', freeText)
 
       const res  = await fetch(`/api/gmail/search?${params}`)
@@ -73,154 +84,208 @@ export function GmailSearchPanel({ open, onClose }: Props) {
     } catch {
       setResults([])
     }
-
     setLoading(false)
     setSearched(true)
   }
 
-  if (!open) return null
+  function getSenderName(from: string): string {
+    const match = from.match(/^([^<]+)</)
+    return match ? match[1].trim() : from
+  }
+
+  function getSenderInitial(from: string): string {
+    return getSenderName(from).charAt(0).toUpperCase() || '?'
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-slate-950">
+    <Sheet open={open} onOpenChange={o => !o && onClose()}>
+      <SheetContent
+        side="right"
+        className="w-full sm:w-[600px] sm:max-w-[600px] flex flex-col p-0 gap-0"
+      >
+        {/* Header */}
+        <SheetHeader className="px-5 py-4 border-b border-slate-200 dark:border-slate-700 shrink-0">
+          <SheetTitle className="flex items-center gap-2 text-base">
+            <Search className="w-4 h-4 text-blue-500" />
+            Search Gmail Inbox
+          </SheetTitle>
+          <SheetDescription className="text-xs">
+            Search directly in your Gmail.
+            Use from:, to:, subject:, after:, before: operators.
+          </SheetDescription>
+        </SheetHeader>
 
-      {/* Search bar header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 sticky top-0">
-        <Search className="w-5 h-5 text-slate-400 shrink-0" />
+        {/* Search bar */}
+        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 shrink-0">
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <Input
+                ref={inputRef}
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                placeholder='e.g. "from:client@co.com proposal"'
+                className="pl-9 text-sm h-9 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 focus:bg-white dark:focus:bg-slate-900"
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={handleSearch}
+              disabled={!query.trim() || loading}
+              className="h-9 px-4 shrink-0"
+            >
+              {loading
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : 'Search'
+              }
+            </Button>
+          </div>
 
-        <input
-          ref={inputRef}
-          type="text"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === 'Enter') handleSearch()
-            if (e.key === 'Escape') onClose()
-          }}
-          placeholder='Search inbox... e.g. "from:client@co.com proposal"'
-          className="flex-1 bg-transparent text-base text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 outline-none"
-        />
-
-        {query && (
-          <button
-            onClick={() => { setQuery(''); setResults([]); setSearched(false) }}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-
-        <button
-          onClick={handleSearch}
-          disabled={!query.trim() || loading}
-          className="px-4 py-1.5 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white transition-colors shrink-0"
-        >
-          {loading
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : 'Search'
-          }
-        </button>
-
-        <button
-          onClick={onClose}
-          className="px-3 py-1.5 rounded-lg text-sm text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
-        >
-          Cancel
-        </button>
-      </div>
-
-      {/* Search hints */}
-      {!searched && !loading && (
-        <div className="px-6 py-8 max-w-2xl mx-auto w-full">
-          <p className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-4">
-            Search tips
-          </p>
-          <div className="grid grid-cols-2 gap-3">
+          {/* Quick filter chips */}
+          <div className="flex gap-1.5 mt-2 flex-wrap">
             {[
-              { label: 'From someone', example: 'from:client@company.com' },
-              { label: 'To someone',   example: 'to:team@company.com' },
-              { label: 'Subject',      example: 'subject:invoice' },
-              { label: 'Date range',   example: 'after:2024/01/01 before:2024/12/31' },
-              { label: 'Keywords',     example: 'project proposal urgent' },
-              { label: 'Combined',     example: 'from:client subject:proposal' },
-            ].map(tip => (
+              { label: 'Today',          q: `after:${new Date().toISOString().split('T')[0].replace(/-/g,'/')}` },
+              { label: 'Unread',         q: 'is:unread' },
+              { label: 'Has attachment', q: 'has:attachment' },
+              { label: 'Important',      q: 'is:important' },
+            ].map(chip => (
               <button
-                key={tip.example}
-                onClick={() => setQuery(tip.example)}
-                className="text-left p-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
+                key={chip.label}
+                onClick={() => {
+                  setQuery(chip.q)
+                  setTimeout(handleSearch, 100)
+                }}
+                className={cn(
+                  'text-[11px] px-2.5 py-1 rounded-full',
+                  'bg-slate-100 dark:bg-slate-800',
+                  'text-slate-600 dark:text-slate-400',
+                  'hover:bg-blue-50 dark:hover:bg-blue-900/20',
+                  'hover:text-blue-600 dark:hover:text-blue-400',
+                  'transition-colors border border-slate-200 dark:border-slate-700',
+                )}
               >
-                <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
-                  {tip.label}
-                </p>
-                <p className="text-sm text-slate-700 dark:text-slate-300 font-mono">
-                  {tip.example}
-                </p>
+                {chip.label}
               </button>
             ))}
           </div>
         </div>
-      )}
 
-      {/* Results */}
-      {searched && !loading && (
+        {/* Results */}
         <div className="flex-1 overflow-y-auto">
-          {results.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <Mail className="w-12 h-12 text-slate-300 dark:text-slate-600 mb-3" />
-              <p className="text-base font-medium text-slate-600 dark:text-slate-400">
+
+          {/* Empty state */}
+          {!searched && !loading && (
+            <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
+              <div className="w-14 h-14 rounded-2xl bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center mb-4">
+                <Search className="w-7 h-7 text-blue-500" />
+              </div>
+              <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                Search your inbox
+              </p>
+              <p className="text-xs text-slate-400 dark:text-slate-500 leading-relaxed">
+                Type a name, subject, or use operators like
+                <br />
+                <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded text-[11px]">
+                  from:client@company.com
+                </code>
+              </p>
+            </div>
+          )}
+
+          {/* Loading */}
+          {loading && (
+            <div className="flex items-center justify-center py-16">
+              <div className="flex flex-col items-center gap-3">
+                <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
+                <p className="text-sm text-slate-400">Searching Gmail...</p>
+              </div>
+            </div>
+          )}
+
+          {/* No results */}
+          {searched && !loading && results.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-16 text-center px-6">
+              <Mail className="w-10 h-10 text-slate-300 dark:text-slate-600 mb-3" />
+              <p className="text-sm font-medium text-slate-600 dark:text-slate-400">
                 No emails found
               </p>
-              <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
+              <p className="text-xs text-slate-400 mt-1">
                 Try different search terms
               </p>
             </div>
-          ) : (
-            <div className="max-w-3xl mx-auto w-full px-4 py-2">
-              <p className="text-xs text-slate-400 dark:text-slate-500 px-2 py-2">
-                About {total.toLocaleString()} results
+          )}
+
+          {/* Results list */}
+          {searched && !loading && results.length > 0 && (
+            <div>
+              <p className="px-5 py-2 text-xs text-slate-400 dark:text-slate-500 border-b border-slate-100 dark:border-slate-800">
+                {results.length} of ~{total.toLocaleString()} results
               </p>
               {results.map(email => (
-                <a
+                <div
                   key={email.id}
-                  href={email.gmailLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-start gap-4 px-3 py-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group border-b border-slate-100 dark:border-slate-800/50 last:border-0"
+                  className="px-4 py-3.5 border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors group"
                 >
-                  {/* Sender avatar */}
-                  <div className="w-9 h-9 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-sm font-semibold text-blue-600 dark:text-blue-400 shrink-0 mt-0.5">
-                    {email.from.charAt(0).toUpperCase()}
-                  </div>
-
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2 mb-0.5">
-                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 truncate">
-                        {email.from.replace(/<.*>/, '').trim() || email.from}
-                      </p>
-                      <p className="text-xs text-slate-400 shrink-0 flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {email.date
-                          ? new Date(email.date).toLocaleDateString('en-IN', {
-                              day: 'numeric', month: 'short',
-                            })
-                          : ''}
-                      </p>
+                  <div className="flex items-start gap-3">
+                    {/* Avatar */}
+                    <div className="w-9 h-9 rounded-full shrink-0 bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-sm font-semibold mt-0.5">
+                      {getSenderInitial(email.from)}
                     </div>
-                    <p className="text-sm text-slate-700 dark:text-slate-300 truncate mb-0.5 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
-                      {email.subject || '(No subject)'}
-                    </p>
-                    <p className="text-xs text-slate-400 dark:text-slate-500 line-clamp-1">
-                      {email.snippet}
-                    </p>
-                  </div>
 
-                  <ExternalLink className="w-3.5 h-3.5 text-slate-300 dark:text-slate-600 group-hover:text-blue-500 shrink-0 mt-1 transition-colors" />
-                </a>
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start justify-between gap-2 mb-0.5">
+                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 truncate leading-tight">
+                          {getSenderName(email.from)}
+                        </p>
+                        <p className="text-[11px] text-slate-400 shrink-0 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {email.date
+                            ? formatDistanceToNow(new Date(email.date), { addSuffix: true })
+                            : '—'
+                          }
+                        </p>
+                      </div>
+
+                      <p className="text-sm text-slate-700 dark:text-slate-300 truncate mb-1 font-medium">
+                        {email.subject || '(No subject)'}
+                      </p>
+
+                      <p className="text-xs text-slate-400 dark:text-slate-500 line-clamp-2 leading-relaxed mb-2.5">
+                        {email.snippet}
+                      </p>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="default"
+                          className="h-7 text-xs px-3 gap-1.5"
+                          onClick={() => onReply?.(email.threadId, email.subject, email.from)}
+                        >
+                          <MessageSquareReply className="w-3 h-3" />
+                          Reply
+                        </Button>
+
+                        <a
+                          href={email.gmailLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 h-7 px-3 rounded-md text-xs border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          Open in Gmail
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               ))}
             </div>
           )}
         </div>
-      )}
-    </div>
+      </SheetContent>
+    </Sheet>
   )
 }

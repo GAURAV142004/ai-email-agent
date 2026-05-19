@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { formatDistanceToNow } from 'date-fns'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import { Header } from '@/components/layout/Header'
@@ -157,10 +158,19 @@ export default function DashboardPage() {
   const [copied, setCopied] = useState(false)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
   const [replyThread, setReplyThread] = useState<ThreadWithMember | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [searchReplyThread, setSearchReplyThread] = useState<ThreadWithMember | null>(null)
+  const [pendingThreads, setPendingThreads] = useState<any[]>([])
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
   }, [status, router])
+
+  const fetchPendingThreads = useCallback(async () => {
+    const res  = await fetch('/api/threads?replyStatus=pending&limit=10')
+    const data = await res.json()
+    setPendingThreads(data.threads ?? [])
+  }, [])
 
   const fetchTasks = useCallback(async () => {
     const params = new URLSearchParams()
@@ -175,9 +185,49 @@ export default function DashboardPage() {
     setLoading(false)
   }, [statusFilter, priorityFilter])
 
+  const syncEmails = async () => {
+    setSyncing(true)
+    try {
+      await fetch('/api/gmail/sync', { method: 'POST' })
+      await fetchTasks()
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  async function handleSearchReply(gmailThreadId: string, subject: string, from: string) {
+    const supabase = createClient()
+    const { data: thread } = await supabase
+      .from('email_threads')
+      .select(`*, owner:team_members!owner_member_id(id, name, email, role)`)
+      .eq('thread_id', gmailThreadId)
+      .single()
+
+    if (thread) {
+      const t = thread as any
+      const shaped: ThreadWithMember = {
+        ...t,
+        owner_name:         t.owner?.name  ?? '',
+        owner_email:        t.owner?.email ?? '',
+        owner_role:         t.owner?.role  ?? '',
+        owner_avatar_url:   null,
+        task_count:         0,
+        pending_task_count: 0,
+        highest_priority:   'medium' as const,
+      }
+      setSearchReplyThread(shaped)
+      setSearchOpen(false)
+    } else {
+      window.open(`https://mail.google.com/mail/u/0/#inbox/${gmailThreadId}`, '_blank')
+    }
+  }
+
   useEffect(() => {
-    if (session) fetchTasks()
-  }, [session, fetchTasks])
+    if (session) {
+      fetchTasks()
+      fetchPendingThreads()
+    }
+  }, [session, fetchTasks, fetchPendingThreads])
 
   useEffect(() => {
     if (!session?.user?.email) return
@@ -310,11 +360,63 @@ export default function DashboardPage() {
               Search Inbox
             </Button>
 
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={syncEmails}
+              disabled={syncing}
+              className="h-8 gap-1.5 text-sm"
+            >
+              <RefreshCw className={cn('w-3.5 h-3.5', syncing && 'animate-spin')} />
+              {syncing ? 'Syncing...' : 'Sync Inbox'}
+            </Button>
+
             <span className="text-xs text-slate-400 dark:text-slate-500 pl-2.5 border-l border-slate-200 dark:border-slate-700">
               {loading ? '—' : `${tasks.length} task${tasks.length !== 1 ? 's' : ''}`}
             </span>
           </div>
         </div>
+
+        {pendingThreads.length > 0 && (
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-base font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                Needs Reply
+                <span className="text-xs font-normal px-2 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded-full">
+                  {pendingThreads.length}
+                </span>
+              </h2>
+            </div>
+            <div className="space-y-2">
+              {pendingThreads.slice(0, 5).map(thread => (
+                <div
+                  key={thread.id}
+                  className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-blue-300 dark:hover:border-blue-700 transition-colors cursor-pointer card-hover"
+                >
+                  <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-white text-xs font-bold">
+                    {thread.from_email?.charAt(0)?.toUpperCase() ?? '?'}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">
+                      {thread.subject || '(No subject)'}
+                    </p>
+                    <p className="text-xs text-slate-400 truncate">
+                      {thread.from_email} · {
+                        thread.received_at
+                          ? formatDistanceToNow(new Date(thread.received_at), { addSuffix: true })
+                          : '—'
+                      }
+                    </p>
+                  </div>
+                  <span className="text-[11px] px-2 py-0.5 bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800 rounded-full shrink-0">
+                    Pending
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <div className={cn('min-w-[600px]', loading ? 'opacity-0 pointer-events-none' : 'animate-fade-in')}>
@@ -348,7 +450,20 @@ export default function DashboardPage() {
         />
       )}
 
-      <GmailSearchPanel open={searchOpen} onClose={() => setSearchOpen(false)} />
+      <GmailSearchPanel
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onReply={handleSearchReply}
+      />
+
+      {searchReplyThread && (
+        <ReplyComposer
+          thread={searchReplyThread}
+          isOpen={searchReplyThread !== null}
+          onClose={() => setSearchReplyThread(null)}
+          onReplySent={() => { setSearchReplyThread(null); fetchTasks() }}
+        />
+      )}
 
       {/* Follow-up dialog */}
       <Dialog open={!!followUpTask} onOpenChange={() => { setFollowUpTask(null); setCopied(false) }}>

@@ -38,7 +38,7 @@ export const authOptions: NextAuthOptions = {
         token.refreshToken = account.refresh_token
         token.googleId = (profile as any)?.sub
       }
-      if (trigger === 'signIn' || trigger === 'update' || !token.memberName) {
+      if (trigger === 'signIn' || trigger === 'update' || !token.memberName || !token.role) {
         const supabase = getServiceClient()
         const { data: member } = await supabase
           .from('team_members')

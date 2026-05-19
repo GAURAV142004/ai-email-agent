@@ -37,8 +37,9 @@ export async function sendInviteEmail({
     process.env.GMAIL_SMTP_APP_PASSWORD === 'your-app-password-here'
 
   if (isDev) {
-    const oauthUrl = `${appUrl}/api/auth/signin/google?callbackUrl=${
-      encodeURIComponent(`${appUrl}/welcome`)
+    const normalizedAppUrl = appUrl.replace(/\/+$/, '')
+    const oauthUrl = `${normalizedAppUrl}/api/auth/signin/google?callbackUrl=${
+      encodeURIComponent(`${normalizedAppUrl}/`)
     }`
     console.log('─────────────────────────────────────────')
     console.log('📨 INVITE EMAIL (dev mode — not sent)')

@@ -19,6 +19,7 @@ import type { Task, TaskStatus, ThreadWithMember } from '@/lib/supabase/types'
 import { Copy, RefreshCw, Search, Sparkles, CheckCircle, Clock, BarChart2, AlertCircle, Hourglass } from 'lucide-react'
 import { GmailSearchPanel } from '@/components/dashboard/GmailSearchPanel'
 import { TaskDetailPanel } from '@/components/dashboard/TaskDetailPanel'
+import { ThreadDetailPanel } from '@/components/dashboard/ThreadDetailPanel'
 import { ReplyComposer } from '@/components/dashboard/ReplyComposer'
 import { cn } from '@/lib/utils'
 
@@ -161,15 +162,25 @@ export default function DashboardPage() {
   const [syncing, setSyncing] = useState(false)
   const [searchReplyThread, setSearchReplyThread] = useState<ThreadWithMember | null>(null)
   const [pendingThreads, setPendingThreads] = useState<any[]>([])
+  const [showAllPending, setShowAllPending] = useState(false)
+  const [selectedThread, setSelectedThread] = useState<ThreadWithMember | null>(null)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
   }, [status, router])
 
   const fetchPendingThreads = useCallback(async () => {
-    const res  = await fetch('/api/threads?replyStatus=pending&limit=10')
+    const res  = await fetch('/api/threads?replyStatus=pending&limit=20')
     const data = await res.json()
-    setPendingThreads(data.threads ?? [])
+    const filtered = (data.threads ?? []).filter((t: any) => {
+      const email   = (t.from_email ?? '').toLowerCase()
+      const subject = (t.subject   ?? '').toLowerCase()
+      const isAutomated =
+        /noreply|no-reply|donotreply|notifications?@|newsletter|mailer|alerts?@|automated@|bounce@|postmaster@/.test(email) ||
+        /transaction alert|newsletter|unsubscribe|shipment|order confirmation|receipt/.test(subject)
+      return !isAutomated && t.sender_category !== 'automated'
+    })
+    setPendingThreads(filtered)
   }, [])
 
   const fetchTasks = useCallback(async () => {
@@ -242,9 +253,17 @@ export default function DashboardPage() {
           t.id === payload.new.id ? { ...t, ...payload.new as Task } : t
         ))
       })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'email_threads' }, () => {
+        fetchPendingThreads()
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'email_threads' }, (payload) => {
+        if (payload.new.reply_status !== 'pending') {
+          setPendingThreads(prev => prev.filter(t => t.id !== payload.new.id))
+        }
+      })
       .subscribe()
     return () => { supabase.removeChannel(channel) }
-  }, [session, fetchTasks])
+  }, [session, fetchTasks, fetchPendingThreads])
 
   const handleStatusChange = async (taskId: string, newStatus: TaskStatus) => {
     await fetch(`/api/tasks/${taskId}`, {
@@ -300,6 +319,7 @@ export default function DashboardPage() {
   )
 
   const greeting = session.user?.name?.split(' ')[0] ?? 'there'
+  const displayedThreads = showAllPending ? pendingThreads : pendingThreads.slice(0, 5)
 
   return (
     <>
@@ -378,7 +398,7 @@ export default function DashboardPage() {
         </div>
 
         {pendingThreads.length > 0 && (
-          <div className="mb-6">
+          <div className="mb-6" id="needs-reply">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-base font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
@@ -388,10 +408,11 @@ export default function DashboardPage() {
                 </span>
               </h2>
             </div>
-            <div className="space-y-2">
-              {pendingThreads.slice(0, 5).map(thread => (
+            <div className={cn('space-y-2', showAllPending && 'max-h-[400px] overflow-y-auto pr-1')}>
+              {displayedThreads.map(thread => (
                 <div
                   key={thread.id}
+                  onClick={() => setSelectedThread(thread as ThreadWithMember)}
                   className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-blue-300 dark:hover:border-blue-700 transition-colors cursor-pointer card-hover"
                 >
                   <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-white text-xs font-bold">
@@ -415,6 +436,17 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+            {pendingThreads.length > 5 && (
+              <button
+                onClick={() => setShowAllPending(v => !v)}
+                className="w-full mt-2 py-2 text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors"
+              >
+                {showAllPending
+                  ? '↑ Show less'
+                  : `↓ Show ${pendingThreads.length - 5} more`
+                }
+              </button>
+            )}
           </div>
         )}
 
@@ -464,6 +496,16 @@ export default function DashboardPage() {
           onReplySent={() => { setSearchReplyThread(null); fetchTasks() }}
         />
       )}
+
+      <ThreadDetailPanel
+        thread={selectedThread}
+        isOpen={selectedThread !== null}
+        onClose={() => setSelectedThread(null)}
+        onReply={(t) => {
+          setSelectedThread(null)
+          setReplyThread(t)
+        }}
+      />
 
       {/* Follow-up dialog */}
       <Dialog open={!!followUpTask} onOpenChange={() => { setFollowUpTask(null); setCopied(false) }}>

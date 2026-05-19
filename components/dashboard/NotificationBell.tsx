@@ -170,7 +170,7 @@ export function NotificationBell() {
           {totalCount > 0 && (
             <div className="px-4 py-2.5 border-t border-slate-100 dark:border-slate-800">
               <a
-                href="/"
+                href="/#needs-reply"
                 onClick={() => setOpen(false)}
                 className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
               >

@@ -14,7 +14,7 @@ export function buildInviteEmail({
 
   const baseUrl = (appUrl ?? '').replace(/\/$/, '')
   const oauthUrl = `${baseUrl}/api/auth/signin/google` +
-    `?callbackUrl=${encodeURIComponent(`${baseUrl}/welcome`)}`
+    `?callbackUrl=${encodeURIComponent(`${baseUrl}/`)}`
 
   const subject = `You've been invited to ${appName}`
 

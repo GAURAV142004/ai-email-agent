@@ -61,14 +61,20 @@ export function isManagerRole(role: TeamRole): boolean {
 }
 
 export function getNavItems(role: TeamRole) {
-  const agent    = { label: 'Agent',        href: '/',               icon: 'Sparkles' };
-  const tasks    = { label: 'All Tasks',    href: '/tasks',          icon: 'CheckSquare' };
-  const team     = { label: 'Team View',    href: '/team',           icon: 'Users' };
-  const monitor  = { label: 'Monitor',      href: '/monitor',        icon: 'BarChart2' };
-  const users    = { label: 'Manage Users', href: '/settings/users', icon: 'UserCog' };
-  const settings = { label: 'Settings',     href: '/settings',       icon: 'Settings' };
+  const agent     = { label: 'Agent',        href: '/agent',          icon: 'Sparkles'        };
+  const dashboard = { label: 'Dashboard',    href: '/',               icon: 'LayoutDashboard' };
+  const tasks     = { label: 'All Tasks',    href: '/tasks',          icon: 'CheckSquare'     };
+  const team      = { label: 'Team View',    href: '/team',           icon: 'Users'           };
+  const monitor   = { label: 'Monitor',      href: '/monitor',        icon: 'BarChart2'       };
+  const users     = { label: 'Manage Users', href: '/settings/users', icon: 'UserCog'         };
+  const settings  = { label: 'Settings',     href: '/settings',       icon: 'Settings'        };
 
-  if (role === 'delivery_lead') return [agent, tasks, team, monitor, users, settings];
-  if (hasTeam(role))            return [agent, tasks, team, users, settings];
-  return [agent, tasks, settings];
+  if (role === 'delivery_lead')    return [agent, dashboard, tasks, team, monitor, users, settings];
+  if (role === 'senior_ba' ||
+      role === 'senior_developer') return [agent, dashboard, tasks, team, users, settings];
+  if (role === 'developer' ||
+      role === 'ba')               return [agent, dashboard, tasks, settings];
+  // senior_mis, mis and any other roles
+  if (hasTeam(role))               return [agent, dashboard, tasks, team, users, settings];
+  return [agent, dashboard, tasks, settings];
 }

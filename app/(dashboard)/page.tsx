@@ -1,565 +1,424 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
-import {
-  Sparkles, Send, Plus, Filter, X,
-  Mail, ChevronDown, ChevronUp,
-  CheckSquare, Calendar, ExternalLink,
-  Trash2, Clock,
-} from 'lucide-react'
-import { formatDistanceToNow } from 'date-fns'
-import { cn } from '@/lib/utils'
 import { Header } from '@/components/layout/Header'
-import type {
-  AgentConversation, AgentMessage,
-  ActionItem, TimelineEvent,
-} from '@/lib/supabase/types'
+import { DailyDigest } from '@/components/dashboard/DailyDigest'
+import { TaskTable } from '@/components/dashboard/TaskTable'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
+import { createClient } from '@/lib/supabase/client'
+import type { Task, TaskStatus, ThreadWithMember } from '@/lib/supabase/types'
+import { Copy, RefreshCw, Search, Sparkles, CheckCircle, Clock, BarChart2, AlertCircle, Hourglass } from 'lucide-react'
+import { GmailSearchPanel } from '@/components/dashboard/GmailSearchPanel'
+import { TaskDetailPanel } from '@/components/dashboard/TaskDetailPanel'
+import { ReplyComposer } from '@/components/dashboard/ReplyComposer'
+import { cn } from '@/lib/utils'
 
-// ── AssistantMessage component ─────────────────
-function AssistantMessage({
-  message,
-  onThreadClick,
-}: {
-  message:       AgentMessage
-  onThreadClick: (t: any) => void
-}) {
-  const [showThreads,  setShowThreads]  = useState(false)
-  const [showActions,  setShowActions]  = useState(true)
-  const [showTimeline, setShowTimeline] = useState(false)
+interface MyStats {
+  avg_response_minutes: number | null
+  on_time_pct: number | null
+  pending_count: number
+  awaiting_reply_count: number
+}
+
+interface ThisWeek {
+  appReplies: number
+  gmailReplies: number
+  avgThisWeek: number | null
+}
+
+function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return m > 0 ? `${h}h ${m}m` : `${h}h`
+}
+
+function MyResponseStats() {
+  const [stats,    setStats]    = useState<MyStats | null>(null)
+  const [thisWeek, setThisWeek] = useState<ThisWeek | null>(null)
+
+  useEffect(() => {
+    fetch('/api/me/stats')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (d) {
+          setStats(d.stats)
+          setThisWeek(d.thisWeek)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  const chips = [
+    {
+      label:  'Avg Response',
+      value:  stats?.avg_response_minutes != null ? formatDuration(stats.avg_response_minutes) : '—',
+      icon:   Clock,
+      color:  stats?.avg_response_minutes == null ? 'text-slate-400'
+              : stats.avg_response_minutes < 120   ? 'text-emerald-600 dark:text-emerald-400'
+              : stats.avg_response_minutes < 480   ? 'text-yellow-600 dark:text-yellow-500'
+              : 'text-red-600 dark:text-red-400',
+    },
+    {
+      label:  'On Time Rate',
+      value:  stats?.on_time_pct != null ? `${Math.round(stats.on_time_pct)}%` : '—',
+      icon:   BarChart2,
+      color:  stats?.on_time_pct == null ? 'text-slate-400'
+              : stats.on_time_pct >= 80  ? 'text-emerald-600 dark:text-emerald-400'
+              : stats.on_time_pct >= 50  ? 'text-yellow-600 dark:text-yellow-500'
+              : 'text-red-600 dark:text-red-400',
+    },
+    {
+      label:  'Pending',
+      value:  stats?.pending_count ?? '—',
+      icon:   AlertCircle,
+      color:  (stats?.pending_count ?? 0) > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-600 dark:text-slate-300',
+    },
+    {
+      label:  'Awaiting Reply',
+      value:  stats?.awaiting_reply_count ?? '—',
+      icon:   Hourglass,
+      color:  (stats?.awaiting_reply_count ?? 0) > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-300',
+    },
+  ]
 
   return (
-    <div className="space-y-4">
-      {/* Main text */}
-      <div className="text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
-        {message.content}
+    <div className="mb-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 border-t-[3px] border-t-blue-500 p-5 shadow-sm animate-slide-up">
+      <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-4">
+        My Response Stats
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+        {chips.map(({ label, value, icon: Icon, color }) => (
+          <div key={label} className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center shrink-0">
+              <Icon className="w-4 h-4 text-slate-400 dark:text-slate-500" />
+            </div>
+            <div>
+              <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-none mb-0.5">{label}</p>
+              <p className={cn('text-base font-bold leading-none', color)}>{value}</p>
+            </div>
+          </div>
+        ))}
       </div>
-
-      {/* Emails analyzed */}
-      {(message.threads?.length ?? 0) > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowThreads(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <Mail className="w-3.5 h-3.5" />
-              {message.threads?.length} emails analyzed
-            </span>
-            {showThreads
-              ? <ChevronUp className="w-3.5 h-3.5" />
-              : <ChevronDown className="w-3.5 h-3.5" />
-            }
-          </button>
-          {showThreads && (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {message.threads?.map((t, i) => (
-                <button
-                  key={i}
-                  onClick={() => onThreadClick(t)}
-                  className="w-full text-left px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
-                >
-                  <p className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate">
-                    {t.subject || '(No subject)'}
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-0.5 truncate">
-                    {t.from} · {t.messageCount} msgs
-                  </p>
-                </button>
-              ))}
-            </div>
+      {thisWeek && (
+        <p className="text-[11px] text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800 pt-3 mt-1">
+          This week: <span className="text-slate-600 dark:text-slate-300 font-medium">{thisWeek.appReplies} via app</span>
+          {' · '}
+          <span className="text-slate-600 dark:text-slate-300 font-medium">{thisWeek.gmailReplies} via Gmail</span>
+          {thisWeek.avgThisWeek != null && (
+            <> · avg {formatDuration(thisWeek.avgThisWeek)}</>
           )}
-        </div>
-      )}
-
-      {/* Action items */}
-      {message.action_items?.length > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowActions(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <CheckSquare className="w-3.5 h-3.5" />
-              {message.action_items.length} action items
-            </span>
-            {showActions
-              ? <ChevronUp className="w-3.5 h-3.5" />
-              : <ChevronDown className="w-3.5 h-3.5" />
-            }
-          </button>
-          {showActions && (
-            <div className="p-3 space-y-2">
-              {message.action_items.map((item: ActionItem, i: number) => (
-                <div key={i} className="flex items-start gap-2.5 p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800">
-                  <div className={cn(
-                    'w-1.5 h-1.5 rounded-full mt-1.5 shrink-0',
-                    item.priority === 'high'   ? 'bg-red-500'
-                    : item.priority === 'medium' ? 'bg-amber-500'
-                    : 'bg-green-500'
-                  )} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                      {item.task}
-                    </p>
-                    {(item.owner || item.due_date) && (
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {item.owner    && `👤 ${item.owner}`}
-                        {item.owner && item.due_date && ' · '}
-                        {item.due_date && `📅 ${item.due_date}`}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Timeline */}
-      {message.timeline?.length > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowTimeline(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <Calendar className="w-3.5 h-3.5" />
-              Timeline ({message.timeline.length} events)
-            </span>
-            {showTimeline
-              ? <ChevronUp className="w-3.5 h-3.5" />
-              : <ChevronDown className="w-3.5 h-3.5" />
-            }
-          </button>
-          {showTimeline && (
-            <div className="p-4 space-y-3">
-              {[...message.timeline]
-                .sort((a: TimelineEvent, b: TimelineEvent) =>
-                  new Date(a.date).getTime() - new Date(b.date).getTime()
-                )
-                .map((ev: TimelineEvent, i: number) => (
-                  <div key={i} className="flex gap-3 items-start">
-                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 shrink-0" />
-                    <div>
-                      <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                        {ev.description}
-                      </p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {ev.date}
-                        {ev.from_email && ` · ${ev.from_email}`}
-                      </p>
-                    </div>
-                  </div>
-                ))
-              }
-            </div>
-          )}
-        </div>
+        </p>
       )}
     </div>
   )
 }
 
-// ── Main page ───────────────────────────────────
-export default function AgentPage() {
+function DigestSkeleton() {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div
+          key={i}
+          className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 border-t-[3px] border-t-slate-200 dark:border-t-slate-700 p-5 shadow-sm animate-fade-in"
+          style={{ animationDelay: `${i * 70}ms` }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="h-2.5 skeleton rounded w-16" />
+            <div className="w-8 h-8 skeleton rounded-xl" />
+          </div>
+          <div className="h-9 skeleton rounded w-12" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export default function DashboardPage() {
   const { data: session, status } = useSession()
   const router = useRouter()
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const inputRef  = useRef<HTMLTextAreaElement>(null)
 
-  const [conversations,  setConversations]  = useState<AgentConversation[]>([])
-  const [currentConvId,  setCurrentConvId]  = useState<string | null>(null)
-  const [messages,       setMessages]       = useState<AgentMessage[]>([])
-  const [inputQuery,     setInputQuery]     = useState('')
-  const [isLoading,      setIsLoading]      = useState(false)
-  const [selectedThread, setSelectedThread] = useState<any | null>(null)
-  const [showFilters,    setShowFilters]    = useState(false)
-  const [filters, setFilters] = useState({ from: '', dateFrom: '', dateTo: '' })
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [loading, setLoading] = useState(true)
+  const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [priorityFilter, setPriorityFilter] = useState<string>('all')
+  const [followUpTask, setFollowUpTask] = useState<Task | null>(null)
+  const [followUpDraft, setFollowUpDraft] = useState<{ subject: string; body: string } | null>(null)
+  const [generatingDraft, setGeneratingDraft] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null)
+  const [replyThread, setReplyThread] = useState<ThreadWithMember | null>(null)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
   }, [status, router])
 
-  useEffect(() => {
-    if (session) fetchConversations()
-  }, [session])
+  const fetchTasks = useCallback(async () => {
+    const params = new URLSearchParams()
+    if (statusFilter !== 'all') params.set('status', statusFilter)
+    if (priorityFilter !== 'all') params.set('priority', priorityFilter)
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isLoading])
-
-  const fetchConversations = useCallback(async () => {
-    const res  = await fetch('/api/agent/conversations')
-    const data = await res.json()
-    setConversations(data.conversations ?? [])
-  }, [])
-
-  async function loadConversation(id: string) {
-    setCurrentConvId(id)
-    setSelectedThread(null)
-    const res  = await fetch(`/api/agent/conversations/${id}`)
-    const data = await res.json()
-    setMessages(data.messages ?? [])
-  }
-
-  function startNewConversation() {
-    setCurrentConvId(null)
-    setMessages([])
-    setInputQuery('')
-    setSelectedThread(null)
-    inputRef.current?.focus()
-  }
-
-  async function deleteConversation(e: React.MouseEvent, id: string) {
-    e.stopPropagation()
-    await fetch(`/api/agent/conversations/${id}`, { method: 'DELETE' })
-    setConversations(prev => prev.filter(c => c.id !== id))
-    if (currentConvId === id) startNewConversation()
-  }
-
-  async function handleSend() {
-    if (!inputQuery.trim() || isLoading) return
-    const query = inputQuery.trim()
-    setInputQuery('')
-    setIsLoading(true)
-
-    const tempId = 'temp-' + Date.now()
-    const tempMsg: AgentMessage = {
-      id: tempId, conversation_id: currentConvId ?? '',
-      role: 'user', content: query,
-      threads_fetched: 0, threads_analyzed: 0,
-      action_items: [], timeline: [],
-      thread_ids: [], tokens_used: 0,
-      created_at: new Date().toISOString(),
-    }
-    setMessages(prev => [...prev, tempMsg])
-
-    try {
-      const res = await fetch('/api/agent/query', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, conversation_id: currentConvId, filters }),
-      })
+    const res = await fetch(`/api/tasks?${params.toString()}`)
+    if (res.ok) {
       const data = await res.json()
-
-      if (!currentConvId) {
-        setCurrentConvId(data.conversation_id)
-        fetchConversations()
-      }
-
-      const assistantMsg: AgentMessage = {
-        id:               data.message_id ?? 'a-' + Date.now(),
-        conversation_id:  data.conversation_id,
-        role:             'assistant',
-        content:          data.response,
-        threads_fetched:  data.threads_fetched ?? 0,
-        threads_analyzed: data.threads_fetched ?? 0,
-        action_items:     data.action_items ?? [],
-        timeline:         data.timeline ?? [],
-        thread_ids:       [],
-        tokens_used:      0,
-        created_at:       new Date().toISOString(),
-        threads:          data.threads ?? [],
-      }
-      setMessages(prev => [
-        ...prev.filter(m => m.id !== tempId),
-        assistantMsg,
-      ])
-    } catch {
-      setMessages(prev => prev.filter(m => m.id !== tempId))
+      setTasks(data.tasks ?? [])
     }
-    setIsLoading(false)
+    setLoading(false)
+  }, [statusFilter, priorityFilter])
+
+  useEffect(() => {
+    if (session) fetchTasks()
+  }, [session, fetchTasks])
+
+  useEffect(() => {
+    if (!session?.user?.email) return
+    const supabase = createClient()
+    const channel = supabase
+      .channel('tasks-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'tasks' }, (payload) => {
+        setTasks(prev => [payload.new as Task, ...prev])
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tasks' }, (payload) => {
+        setTasks(prev => prev.map(t =>
+          t.id === payload.new.id ? { ...t, ...payload.new as Task } : t
+        ))
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [session, fetchTasks])
+
+  const handleStatusChange = async (taskId: string, newStatus: TaskStatus) => {
+    await fetch(`/api/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    })
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)))
   }
 
-  if (status === 'loading' || !session) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-slate-50 dark:bg-slate-950">
-        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+  const handleFollowUp = async (task: Task) => {
+    setFollowUpTask(task)
+    setFollowUpDraft(null)
+    setGeneratingDraft(true)
+    setCopied(false)
+
+    const res = await fetch('/api/ai/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'followup',
+        subject: task.email_threads?.subject ?? '',
+        threadContent: task.email_threads?.summary ?? task.task,
+        taskDescription: task.task,
+      }),
+    })
+
+    if (res.ok) {
+      const data = await res.json()
+      setFollowUpDraft(data.draft)
+    }
+    setGeneratingDraft(false)
+  }
+
+  const handleCopy = () => {
+    if (!followUpDraft) return
+    navigator.clipboard.writeText(`Subject: ${followUpDraft.subject}\n\n${followUpDraft.body}`)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2200)
+  }
+
+  if (status === 'loading' || !session) return (
+    <div className="p-6 animate-fade-in">
+      <div className="h-16 mb-6 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 -mx-6 -mt-6 px-6 flex items-center">
+        <div className="h-5 skeleton rounded w-32" />
       </div>
-    )
-  }
+      <DigestSkeleton />
+      <div className="h-12 skeleton rounded-2xl mb-5" />
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div key={i} className="h-14 skeleton rounded-xl mb-2" style={{ animationDelay: `${i * 40}ms` }} />
+      ))}
+    </div>
+  )
 
-  const EXAMPLES = [
-    'What is the current status of the Infosys project?',
-    'Any pending deliverables from the client this week?',
-    'What did the client say about the API integration?',
-    'Show all communication with team@company.com',
-  ]
+  const greeting = session.user?.name?.split(' ')[0] ?? 'there'
 
   return (
     <>
-      <Header title="Agent" subtitle="Project Intelligence" />
-      <div className="flex" style={{ height: 'calc(100vh - 4rem)' }}>
+      <Header
+        title="Dashboard"
+        subtitle={`Welcome back, ${greeting}`}
+      />
+      <div className="p-6">
+        {loading ? <DigestSkeleton /> : <DailyDigest tasks={tasks} />}
 
-        {/* ── Left: Conversations ─────────────── */}
-        <aside className="w-64 border-r flex flex-col border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 shrink-0">
-          <div className="p-3 border-b border-slate-200 dark:border-slate-700">
-            <button
-              onClick={startNewConversation}
-              className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+        <MyResponseStats />
+
+        {/* Filter bar */}
+        <div className="flex flex-wrap items-center gap-2.5 mb-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl px-4 py-3 shadow-sm animate-slide-up">
+          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v ?? 'all')}>
+            <SelectTrigger className="w-38 h-8 text-sm border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-white dark:hover:bg-slate-700 rounded-lg transition-colors dark:text-slate-300">
+              <SelectValue placeholder="All status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All status</SelectItem>
+              <SelectItem value="pending">Pending</SelectItem>
+              <SelectItem value="in_progress">In Progress</SelectItem>
+              <SelectItem value="completed">Completed</SelectItem>
+              <SelectItem value="ignored">Ignored</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Select value={priorityFilter} onValueChange={(v) => setPriorityFilter(v ?? 'all')}>
+            <SelectTrigger className="w-38 h-8 text-sm border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-white dark:hover:bg-slate-700 rounded-lg transition-colors dark:text-slate-300">
+              <SelectValue placeholder="All priority" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All priority</SelectItem>
+              <SelectItem value="high">High</SelectItem>
+              <SelectItem value="medium">Medium</SelectItem>
+              <SelectItem value="low">Low</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <div className="flex items-center gap-2 ml-auto">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 px-3 rounded-lg text-sm"
+              onClick={fetchTasks}
             >
-              <Plus className="w-4 h-4" />
-              New Query
-            </button>
+              <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+              Refresh
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-blue-50 dark:hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-200 dark:hover:border-blue-500/40 transition-all duration-200 px-3 rounded-lg text-sm"
+              onClick={() => setSearchOpen(true)}
+            >
+              <Search className="w-3.5 h-3.5 mr-1.5" />
+              Search Inbox
+            </Button>
+
+            <span className="text-xs text-slate-400 dark:text-slate-500 pl-2.5 border-l border-slate-200 dark:border-slate-700">
+              {loading ? '—' : `${tasks.length} task${tasks.length !== 1 ? 's' : ''}`}
+            </span>
           </div>
+        </div>
 
-          <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-            {conversations.map(conv => (
-              <div
-                key={conv.id}
-                onClick={() => loadConversation(conv.id)}
-                className={cn(
-                  'group w-full text-left px-3 py-2.5',
-                  'rounded-xl cursor-pointer transition-colors',
-                  'flex items-start justify-between gap-2',
-                  currentConvId === conv.id
-                    ? 'bg-blue-50 dark:bg-blue-900/20'
-                    : 'hover:bg-slate-100 dark:hover:bg-slate-800'
-                )}
-              >
-                <div className="flex-1 min-w-0">
-                  <p className={cn(
-                    'text-sm truncate font-medium leading-tight',
-                    currentConvId === conv.id
-                      ? 'text-blue-700 dark:text-blue-300'
-                      : 'text-slate-700 dark:text-slate-300'
-                  )}>
-                    {conv.title}
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
-                    {formatDistanceToNow(new Date(conv.updated_at), { addSuffix: true })}
-                  </p>
-                </div>
-                <button
-                  onClick={e => deleteConversation(e, conv.id)}
-                  className="opacity-0 group-hover:opacity-100 p-1 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all shrink-0"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </div>
-            ))}
-            {conversations.length === 0 && (
-              <p className="text-xs text-slate-400 text-center py-8 px-4 leading-relaxed">
-                No queries yet.<br />
-                Start by asking about a project.
-              </p>
-            )}
+        <div className="overflow-x-auto">
+          <div className={cn('min-w-[600px]', loading ? 'opacity-0 pointer-events-none' : 'animate-fade-in')}>
+            <TaskTable
+              tasks={tasks}
+              onStatusChange={handleStatusChange}
+              onFollowUp={handleFollowUp}
+              onTaskClick={setSelectedTask}
+            />
           </div>
-        </aside>
-
-        {/* ── Center: Chat ────────────────────── */}
-        <main className="flex-1 flex flex-col min-w-0">
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
-
-            {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full text-center max-w-lg mx-auto">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mb-6 shadow-lg shadow-blue-500/30">
-                  <Sparkles className="w-8 h-8 text-white" />
-                </div>
-                <h2 className="text-xl font-semibold text-slate-800 dark:text-slate-200 mb-2">
-                  Project Intelligence Agent
-                </h2>
-                <p className="text-sm text-slate-500 dark:text-slate-400 mb-8 leading-relaxed">
-                  Ask me about any project, client, or topic.
-                  I&apos;ll search across your team&apos;s emails and give you a complete status update.
-                </p>
-                <div className="grid gap-2 w-full">
-                  {EXAMPLES.map(ex => (
-                    <button
-                      key={ex}
-                      onClick={() => setInputQuery(ex)}
-                      className="text-left px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 text-sm text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 hover:border-blue-300 dark:hover:border-blue-700 transition-colors"
-                    >
-                      {ex}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {messages.map(msg => (
-              <div key={msg.id} className={cn(
-                'flex gap-3',
-                msg.role === 'user' ? 'justify-end' : 'justify-start'
-              )}>
-                {msg.role === 'assistant' && (
-                  <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mt-1">
-                    <Sparkles className="w-4 h-4 text-white" />
-                  </div>
-                )}
-                <div className={cn(
-                  'rounded-2xl',
-                  msg.role === 'user'
-                    ? 'max-w-[70%] bg-blue-600 text-white px-4 py-3'
-                    : 'flex-1 max-w-[85%] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-5 py-4 space-y-4'
-                )}>
-                  {msg.role === 'user' ? (
-                    <p className="text-sm leading-relaxed">{msg.content}</p>
-                  ) : (
-                    <AssistantMessage message={msg} onThreadClick={setSelectedThread} />
-                  )}
-                </div>
-              </div>
-            ))}
-
-            {isLoading && (
-              <div className="flex gap-3 justify-start">
-                <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
-                  <Sparkles className="w-4 h-4 text-white" />
-                </div>
-                <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl px-5 py-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex gap-1">
-                      {[0, 1, 2].map(i => (
-                        <div
-                          key={i}
-                          className="w-2 h-2 rounded-full bg-blue-500 animate-bounce"
-                          style={{ animationDelay: `${i * 0.15}s` }}
-                        />
-                      ))}
-                    </div>
-                    <span className="text-xs text-slate-400">
-                      Searching emails and analyzing...
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div ref={bottomRef} />
-          </div>
-
-          {/* Input */}
-          <div className="border-t border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-white dark:bg-slate-900/50">
-
-            {showFilters && (
-              <div className="flex gap-2 flex-wrap p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
-                <input
-                  type="text"
-                  placeholder="From email..."
-                  value={filters.from}
-                  onChange={e => setFilters(f => ({ ...f, from: e.target.value }))}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-500/50"
-                />
-                <input
-                  type="date"
-                  value={filters.dateFrom}
-                  onChange={e => setFilters(f => ({ ...f, dateFrom: e.target.value }))}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
-                />
-                <input
-                  type="date"
-                  value={filters.dateTo}
-                  onChange={e => setFilters(f => ({ ...f, dateTo: e.target.value }))}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
-                />
-                <button
-                  onClick={() => setFilters({ from: '', dateFrom: '', dateTo: '' })}
-                  className="text-xs text-slate-400 hover:text-slate-600 px-2"
-                >
-                  Clear
-                </button>
-              </div>
-            )}
-
-            <div className="flex gap-3 items-end">
-              <button
-                onClick={() => setShowFilters(v => !v)}
-                title="Toggle filters"
-                className={cn(
-                  'p-2.5 rounded-xl border shrink-0 transition-colors',
-                  showFilters
-                    ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-                    : 'border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
-                )}
-              >
-                <Filter className="w-4 h-4" />
-              </button>
-
-              <div className="flex-1 relative">
-                <textarea
-                  ref={inputRef}
-                  value={inputQuery}
-                  onChange={e => setInputQuery(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      handleSend()
-                    }
-                  }}
-                  placeholder="Ask about a project, client, or topic..."
-                  rows={1}
-                  className="w-full resize-none px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-800 dark:text-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 dark:focus:border-blue-600 transition-all"
-                  style={{ minHeight: '48px', maxHeight: '120px' }}
-                />
-              </div>
-
-              <button
-                onClick={handleSend}
-                disabled={!inputQuery.trim() || isLoading}
-                className="p-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white transition-colors shrink-0"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-[11px] text-slate-400 text-center">
-              Searches across your team&apos;s inboxes · Enter to send · Shift+Enter for new line
-            </p>
-          </div>
-        </main>
-
-        {/* ── Right: Thread detail ─────────────── */}
-        {selectedThread && (
-          <aside className="w-80 border-l shrink-0 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col">
-            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                Email Thread
-              </p>
-              <button
-                onClick={() => setSelectedThread(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200 leading-snug">
-                {selectedThread.subject || '(No subject)'}
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {selectedThread.from}
-              </p>
-              <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                <Clock className="w-3 h-3" />
-                {selectedThread.date}
-                <span className="ml-1">· {selectedThread.messageCount} messages</span>
-              </div>
-              <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed whitespace-pre-wrap">
-                  {selectedThread.snippet}
-                </p>
-              </div>
-            </div>
-            <div className="p-4 border-t border-slate-200 dark:border-slate-700">
-              <a
-                href={selectedThread.gmailLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-xl transition-colors"
-              >
-                <ExternalLink className="w-4 h-4" />
-                Open in Gmail
-              </a>
-            </div>
-          </aside>
-        )}
+        </div>
       </div>
+
+      <TaskDetailPanel
+        task={selectedTask}
+        isOpen={selectedTask !== null}
+        onClose={() => setSelectedTask(null)}
+        onTaskUpdated={(updated) => {
+          setTasks(prev => prev.map(t => t.id === updated.id ? updated : t))
+          setSelectedTask(updated)
+        }}
+        onReply={(thread) => setReplyThread(thread)}
+      />
+
+      {replyThread && (
+        <ReplyComposer
+          thread={replyThread}
+          isOpen={replyThread !== null}
+          onClose={() => setReplyThread(null)}
+          onReplySent={() => { setReplyThread(null); fetchTasks() }}
+        />
+      )}
+
+      <GmailSearchPanel open={searchOpen} onClose={() => setSearchOpen(false)} />
+
+      {/* Follow-up dialog */}
+      <Dialog open={!!followUpTask} onOpenChange={() => { setFollowUpTask(null); setCopied(false) }}>
+        <DialogContent className="max-w-lg dark:bg-slate-900 dark:border-slate-800">
+          <DialogHeader>
+            <div className="flex items-center gap-2.5 mb-1">
+              <div className="w-8 h-8 rounded-xl bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
+                <Sparkles className="w-4 h-4 text-blue-500" />
+              </div>
+              <DialogTitle className="text-base font-bold dark:text-white">Draft Follow-up Reply</DialogTitle>
+            </div>
+            <DialogDescription className="text-sm leading-relaxed dark:text-slate-400">
+              AI-generated reply for:{' '}
+              <span className="font-semibold text-slate-700 dark:text-slate-300">{followUpTask?.task}</span>
+            </DialogDescription>
+          </DialogHeader>
+
+          {generatingDraft ? (
+            <div className="py-12 flex flex-col items-center gap-3.5">
+              <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
+                <Sparkles className="w-6 h-6 text-blue-500 animate-pulse" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">Drafting your reply…</p>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">This usually takes a few seconds</p>
+              </div>
+            </div>
+          ) : followUpDraft ? (
+            <div className="space-y-3.5 animate-fade-in">
+              <div>
+                <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Subject</p>
+                <p className="text-sm text-slate-800 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 font-medium">
+                  {followUpDraft.subject}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Body</p>
+                <pre className="text-sm text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto">
+                  {followUpDraft.body}
+                </pre>
+              </div>
+              <Button
+                size="sm"
+                className={`w-full h-10 text-sm font-semibold rounded-xl transition-all duration-200 ${
+                  copied
+                    ? 'bg-emerald-600 hover:bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
+                    : 'bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 text-white dark:text-slate-900'
+                }`}
+                onClick={handleCopy}
+              >
+                {copied ? (
+                  <>
+                    <CheckCircle className="w-3.5 h-3.5 mr-2" />
+                    Copied to clipboard!
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 mr-2" />
+                    Copy to clipboard
+                  </>
+                )}
+              </Button>
+            </div>
+          ) : (
+            <div className="py-8 text-center text-slate-400 dark:text-slate-500 text-sm">
+              Could not generate draft. Please try again.
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

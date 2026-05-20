@@ -38,4 +38,3 @@ CREATE POLICY "agent_conv_all" ON agent_conversations
   FOR ALL USING (true);
 CREATE POLICY "agent_msg_all"  ON agent_messages
   FOR ALL USING (true);
-# This is agent conversations and messages tables, with RLS policies that allow access to all rows. In a production environment, you would want to implement more restrictive policies based on the member_id or other criteria to ensure data privacy and security.

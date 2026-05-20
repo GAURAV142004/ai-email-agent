@@ -264,12 +264,19 @@ export default function AgentPage() {
         created_at:       new Date().toISOString(),
         threads:          data.threads ?? [],
       }
-      setMessages(prev => [
-        ...prev.filter(m => m.id !== tempId),
-        assistantMsg,
-      ])
+      setMessages(prev => [...prev, assistantMsg])
     } catch {
-      setMessages(prev => prev.filter(m => m.id !== tempId))
+      // keep the user message, show error as assistant reply
+      setMessages(prev => [...prev, {
+        id:               'err-' + Date.now(),
+        conversation_id:  currentConvId ?? '',
+        role:             'assistant' as const,
+        content:          'Something went wrong. Please try again.',
+        threads_fetched:  0, threads_analyzed: 0,
+        action_items:     [], timeline: [],
+        thread_ids:       [], tokens_used: 0,
+        created_at:       new Date().toISOString(),
+      }])
     }
     setIsLoading(false)
   }

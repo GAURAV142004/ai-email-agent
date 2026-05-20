@@ -19,7 +19,7 @@ const bedrock = new BedrockRuntimeClient({
 async function invokeNova(
   system:    string,
   user:      string,
-  maxTokens: number = 2000,
+  maxTokens = 2000,
 ): Promise<string> {
   const body = JSON.stringify({
     messages: [{ role: 'user', content: [{ text: user }] }],
@@ -37,63 +37,75 @@ async function invokeNova(
   return result.output?.message?.content?.[0]?.text ?? ''
 }
 
-// Paginate through ALL Gmail results for a query
-async function fetchAllThreads(
+// Fetch up to MAX_THREADS threads for one member — all thread details in parallel
+async function searchMemberGmail(
   gmail:      any,
   q:          string,
   seenIds:    Set<string>,
+  maxThreads = 25,
 ): Promise<any[]> {
-  const threads: any[]           = []
-  let pageToken: string | undefined = undefined
+  // One list call — no pagination, keeps latency predictable
+  const listRes: any = await gmail.users.messages.list({
+    userId:     'me',
+    q,
+    maxResults: maxThreads,
+  })
 
-  do {
-    try {
-      const listRes: any = await gmail.users.messages.list({
-        userId:     'me',
-        q,
-        maxResults: 500,
-        ...(pageToken ? { pageToken } : {}),
+  const messages: any[] = listRes.data.messages ?? []
+
+  // Deduplicate by threadId before fetching details
+  const uniqueThreadIds = messages
+    .map((m: any) => m.threadId)
+    .filter((id: string) => id && !seenIds.has(id))
+    .filter((id: string, i: number, arr: string[]) => arr.indexOf(id) === i)
+    .slice(0, maxThreads)
+
+  uniqueThreadIds.forEach((id: string) => seenIds.add(id))
+
+  if (uniqueThreadIds.length === 0) return []
+
+  // Fetch all thread details IN PARALLEL — this is the key speedup
+  const results = await Promise.allSettled(
+    uniqueThreadIds.map((threadId: string) =>
+      gmail.users.threads.get({
+        userId:          'me',
+        id:              threadId,
+        format:          'METADATA',
+        metadataHeaders: ['From', 'To', 'Subject', 'Date'],
       })
-      pageToken = listRes.data.nextPageToken
+    )
+  )
 
-      for (const msg of listRes.data.messages ?? []) {
-        if (!msg.threadId || seenIds.has(msg.threadId)) continue
-        seenIds.add(msg.threadId)
+  const threads: any[] = []
+  for (const res of results) {
+    if (res.status !== 'fulfilled') continue
+    try {
+      const msgs  = res.value.data.messages ?? []
+      const first = msgs[0]
+      const h     = first?.payload?.headers ?? []
+      const get   = (n: string) =>
+        h.find((x: any) => x.name === n)?.value ?? ''
 
-        try {
-          const t = await gmail.users.threads.get({
-            userId:          'me',
-            id:              msg.threadId,
-            format:          'METADATA',
-            metadataHeaders: ['From', 'To', 'Subject', 'Date'],
-          })
-          const msgs  = t.data.messages ?? []
-          const first = msgs[0]
-          const h     = first?.payload?.headers ?? []
-          const get   = (n: string) =>
-            h.find((x: any) => x.name === n)?.value ?? ''
+      const snippet = msgs
+        .map((m: any) => {
+          const from = (m.payload?.headers ?? [])
+            .find((x: any) => x.name === 'From')?.value ?? ''
+          return `[${from}]: ${m.snippet ?? ''}`
+        })
+        .join('\n')
+        .slice(0, 600)
 
-          const content = msgs.map((m: any) => {
-            const mh   = m.payload?.headers ?? []
-            const from = mh.find((x: any) => x.name === 'From')?.value ?? ''
-            return `[${from}]: ${m.snippet ?? ''}`
-          }).join('\n')
-
-          threads.push({
-            threadId:     msg.threadId,
-            subject:      get('Subject'),
-            from:         get('From'),
-            date:         get('Date'),
-            messageCount: msgs.length,
-            snippet:      content.slice(0, 600),
-            gmailLink:    `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(q)}/${msg.threadId}`,
-          })
-        } catch { /* skip individual thread */ }
-      }
-    } catch {
-      pageToken = undefined // stop on error
-    }
-  } while (pageToken)
+      threads.push({
+        threadId:     res.value.data.id,
+        subject:      get('Subject'),
+        from:         get('From'),
+        date:         get('Date'),
+        messageCount: msgs.length,
+        snippet,
+        gmailLink: `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(q)}/${res.value.data.id}`,
+      })
+    } catch { /* skip malformed */ }
+  }
 
   return threads
 }
@@ -107,7 +119,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const supabase = getServiceSupabase()
 
-  // Step 1: Get or create conversation
+  // ── Step 1: Get or create conversation ──────────────
   let convId = conversation_id
   if (!convId) {
     const { data: conv } = await supabase
@@ -123,14 +135,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       .eq('id', convId)
   }
 
-  // Step 2: Save user message to Supabase
+  // ── Step 2: Save user message ────────────────────────
   await supabase.from('agent_messages').insert({
     conversation_id: convId,
     role:            'user',
     content:         query,
   })
 
-  // Step 3: Get conversation history for context
+  // ── Step 3: Conversation history for context ─────────
   const { data: history } = await supabase
     .from('agent_messages')
     .select('role, content')
@@ -138,18 +150,37 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .order('created_at', { ascending: true })
     .limit(8)
 
-  // Step 4: Extract Gmail search keywords
-  const keywordText = await invokeNova(
-    'Extract Gmail search query from user input. Reply JSON only.',
-    `Query: "${query}"
+  // ── Step 4: Extract Gmail search keywords ────────────
+  // Run in parallel with member lookup — independent work
+  const [keywordText, memberResult] = await Promise.all([
+    invokeNova(
+      'Extract Gmail search query from user input. Reply JSON only.',
+      `Query: "${query}"
 ${filters.from     ? `From: ${filters.from}` : ''}
 ${filters.dateFrom ? `After: ${filters.dateFrom}` : ''}
 ${filters.dateTo   ? `Before: ${filters.dateTo}` : ''}
 
-Return: {"gmail_query": "search terms for Gmail API"}
-Keep it simple — 2-4 key words from the query.`,
-    100,
-  )
+Return: {"gmail_query": "2-4 key search words only"}`,
+      100,
+    ),
+    // ── Step 5: Get visible member IDs ───────────────────
+    (async () => {
+      let ids: string[] = [member.id]
+      if (member.role === 'delivery_lead') {
+        const { data: all } = await supabase
+          .from('team_members').select('id').eq('is_active', true)
+        ids = all?.map((m: any) => m.id) ?? [member.id]
+      } else if (isManagerRole(member.role as TeamRole)) {
+        const { data: reports } = await supabase
+          .from('team_member_reports')
+          .select('member_id').eq('manager_id', member.id)
+        ids = [member.id, ...(reports?.map((r: any) => r.member_id) ?? [])]
+      }
+      return ids
+    })(),
+  ])
+
+  const memberIds = memberResult
 
   let gmailQuery = query.slice(0, 50)
   try {
@@ -160,23 +191,9 @@ Keep it simple — 2-4 key words from the query.`,
     if (filters.dateTo)   gmailQuery += ` before:${filters.dateTo.replace(/-/g, '/')}`
   } catch { /* use raw query */ }
 
-  // Step 5: Get ALL visible member IDs
-  let memberIds: string[] = [member.id]
-  if (member.role === 'delivery_lead') {
-    const { data: all } = await supabase
-      .from('team_members').select('id').eq('is_active', true)
-    memberIds = all?.map((m: any) => m.id) ?? [member.id]
-  } else if (isManagerRole(member.role as TeamRole)) {
-    const { data: reports } = await supabase
-      .from('team_member_reports')
-      .select('member_id').eq('manager_id', member.id)
-    memberIds = [
-      member.id,
-      ...(reports?.map((r: any) => r.member_id) ?? []),
-    ]
-  }
-
-  // Step 6: Search ALL members' Gmail with full pagination
+  // ── Step 6: Search all members' Gmail ───────────────
+  // Members run sequentially (Gmail rate-limit safety),
+  // but thread fetches within each member are parallel.
   const allThreads: any[]          = []
   const seenThreadIds = new Set<string>()
 
@@ -199,12 +216,12 @@ Keep it simple — 2-4 key words from the query.`,
       })
       const gmail = google.gmail({ version: 'v1', auth })
 
-      const threads = await fetchAllThreads(gmail, gmailQuery, seenThreadIds)
+      const threads = await searchMemberGmail(gmail, gmailQuery, seenThreadIds, 25)
       allThreads.push(...threads)
-    } catch { /* skip member */ }
+    } catch { /* skip member on auth/network error */ }
   }
 
-  // No results
+  // ── Step 7: No results ───────────────────────────────
   if (allThreads.length === 0) {
     const msg = `I searched across the team's inboxes for "${query}" but found no relevant emails. Try different keywords or broaden your search.`
     await supabase.from('agent_messages').insert({
@@ -217,7 +234,7 @@ Keep it simple — 2-4 key words from the query.`,
     })
   }
 
-  // Step 7: AI analysis
+  // ── Step 8: AI analysis ──────────────────────────────
   const threadData = allThreads
     .map((t, i) =>
       `[Thread ${i + 1}] Subject: "${t.subject}" | From: ${t.from} | Date: ${t.date} | ${t.messageCount} messages\n${t.snippet}`
@@ -229,16 +246,16 @@ Keep it simple — 2-4 key words from the query.`,
     .join('\n')
 
   const analysisText = await invokeNova(
-    'You are a project intelligence agent. Analyze emails and answer questions. Reply JSON only.',
+    'You are a project intelligence agent. Analyze emails and answer questions concisely. Reply JSON only.',
     `${convHistory ? `Previous conversation:\n${convHistory}\n\n` : ''}User query: "${query}"
 
-${allThreads.length} relevant email threads found:
+${allThreads.length} email threads found:
 
 ${threadData}
 
 Reply with this JSON:
 {
-  "summary": "2-3 paragraph answer to the query with specific names dates and details",
+  "summary": "2-3 paragraph answer with specific names, dates, and details",
   "status": "one sentence current status",
   "key_findings": ["finding 1", "finding 2"],
   "action_items": [{"task":"","owner":null,"due_date":null,"priority":"medium","email_ref":null}],
@@ -250,9 +267,9 @@ Reply with this JSON:
   )
 
   let analysis: any = {
-    summary: `Analyzed ${allThreads.length} emails for: ${query}`,
+    summary:      `Analyzed ${allThreads.length} emails for: ${query}`,
     key_findings: [], action_items: [],
-    timeline: [], risks: [], next_steps: [],
+    timeline:     [], risks: [],      next_steps: [],
   }
   try {
     analysis = JSON.parse(analysisText.replace(/```json|```/g, '').trim())
@@ -272,7 +289,7 @@ Reply with this JSON:
     `\n_Searched ${allThreads.length} emails across ${memberIds.length} team member${memberIds.length > 1 ? 's' : ''}_`,
   ].filter(Boolean).join('\n')
 
-  // Step 8: Save assistant message to Supabase
+  // ── Step 9: Save assistant message ──────────────────
   const { data: savedMsg } = await supabase
     .from('agent_messages')
     .insert({

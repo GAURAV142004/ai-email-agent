@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useSession } from 'next-auth/react'
 import { cn } from '@/lib/utils'
-import { LayoutDashboard, CheckSquare, Settings, Zap, Users, BarChart2, UserCog } from 'lucide-react'
+import { LayoutDashboard, CheckSquare, Settings, Zap, Users, BarChart2, UserCog, Sparkles } from 'lucide-react'
 import { getNavItems, type TeamRole } from '@/lib/roles'
 
 interface SidebarProps {
@@ -26,6 +26,7 @@ export function Sidebar({ isMobileOpen = false, onMobileClose }: SidebarProps) {
     Users,
     BarChart2,
     UserCog,
+    Sparkles,
   }
 
   return (

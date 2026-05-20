@@ -61,14 +61,14 @@ export function isManagerRole(role: TeamRole): boolean {
 }
 
 export function getNavItems(role: TeamRole) {
-  const inbox    = { label: 'Dashboard',    href: '/',               icon: 'LayoutDashboard' };
+  const agent    = { label: 'Agent',        href: '/',               icon: 'Sparkles' };
   const tasks    = { label: 'All Tasks',    href: '/tasks',          icon: 'CheckSquare' };
   const team     = { label: 'Team View',    href: '/team',           icon: 'Users' };
   const monitor  = { label: 'Monitor',      href: '/monitor',        icon: 'BarChart2' };
   const users    = { label: 'Manage Users', href: '/settings/users', icon: 'UserCog' };
   const settings = { label: 'Settings',     href: '/settings',       icon: 'Settings' };
 
-  if (role === 'delivery_lead') return [inbox, tasks, team, monitor, users, settings];
-  if (hasTeam(role))            return [inbox, tasks, team, users, settings];
-  return [inbox, tasks, settings];
+  if (role === 'delivery_lead') return [agent, tasks, team, monitor, users, settings];
+  if (hasTeam(role))            return [agent, tasks, team, users, settings];
+  return [agent, tasks, settings];
 }

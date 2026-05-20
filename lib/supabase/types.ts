@@ -192,6 +192,44 @@ export interface OverdueThread {
   owner_role: string
 }
 
+export interface AgentConversation {
+  id:         string
+  member_id:  string
+  title:      string
+  created_at: string
+  updated_at: string
+}
+
+export interface ActionItem {
+  task:      string
+  owner:     string | null
+  due_date:  string | null
+  priority:  'high' | 'medium' | 'low'
+  email_ref: string | null
+}
+
+export interface TimelineEvent {
+  date:        string
+  description: string
+  from_email:  string | null
+  type:        'sent' | 'received' | 'milestone'
+}
+
+export interface AgentMessage {
+  id:               string
+  conversation_id:  string
+  role:             'user' | 'assistant'
+  content:          string
+  threads_fetched:  number
+  threads_analyzed: number
+  action_items:     ActionItem[]
+  timeline:         TimelineEvent[]
+  thread_ids:       string[]
+  tokens_used:      number
+  created_at:       string
+  threads?:         any[]
+}
+
 export interface Database {
   public: {
     Tables: {

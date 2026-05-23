@@ -7,10 +7,6 @@ import { Header } from '@/components/layout/Header'
 import { PersonalEmailCard } from '@/components/dashboard/PersonalEmailCard'
 import { DailyTodos } from '@/components/dashboard/DailyTodos'
 import {
-  Dialog,
-  DialogContent,
-} from '@/components/ui/dialog'
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -30,7 +26,7 @@ import type {
 import {
   Mail, MailOpen, Zap, CheckSquare, Search,
   RefreshCw, Send, Loader2, X, Reply,
-  AlertCircle, CheckCheck,
+  AlertCircle, CheckCheck, Sparkles,
 } from 'lucide-react'
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
@@ -99,20 +95,53 @@ interface ReplyModalProps {
 }
 
 function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
-  const [body,    setBody]    = useState('')
-  const [sending, setSending] = useState(false)
-  const [error,   setError]   = useState<string | null>(null)
-  const [sent,    setSent]    = useState(false)
+  const [body,      setBody]      = useState('')
+  const [sending,   setSending]   = useState(false)
+  const [drafting,  setDrafting]  = useState(false)
+  const [error,     setError]     = useState<string | null>(null)
+  const [sent,      setSent]      = useState(false)
 
   useEffect(() => {
     if (!email) { setBody(''); setError(null); setSent(false) }
   }, [email])
 
+  // Close on Escape
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape' && !sending) onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [sending, onClose])
+
+  async function handleDraft() {
+    if (!email || drafting) return
+    setDrafting(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/ai/draft', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          subject:  email.subject,
+          fromName: email.from_name,
+          snippet:  email.snippet,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Draft failed')
+      setBody(data.draft ?? '')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate draft')
+    } finally {
+      setDrafting(false)
+    }
+  }
+
   async function handleSend() {
     if (!email || !body.trim() || sending) return
     setSending(true)
     setError(null)
-
     try {
       const res = await fetch('/api/gmail/reply', {
         method:  'POST',
@@ -124,12 +153,10 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
           bodyHtml:        body.trim().replace(/\n/g, '<br>'),
         }),
       })
-
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error((data as { error?: string }).error ?? `Error ${res.status}`)
-
       setSent(true)
-      setTimeout(() => { onSent() }, 1000)
+      setTimeout(() => { onSent() }, 1200)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send reply')
       setSending(false)
@@ -143,15 +170,22 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
   const sender   = email.from_name || email.from_email || 'Unknown sender'
 
   return (
-    <Dialog open={!!email} onOpenChange={(open) => { if (!open && !sending) onClose() }}>
-      <DialogContent showCloseButton={false} className="max-w-2xl sm:max-w-2xl p-0 gap-0 overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-2xl">
-        <div className="flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={() => { if (!sending) onClose() }}
+      />
 
+      {/* Modal card */}
+      <div className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 flex flex-col overflow-hidden"
+        style={{ maxHeight: '90vh' }}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-blue-50 dark:bg-blue-950/40 flex items-center justify-center">
-              <Reply className="w-4.5 h-4.5 text-blue-500" />
+              <Reply className="w-4 h-4 text-blue-500" />
             </div>
             <div>
               <p className="text-sm font-semibold text-slate-800 dark:text-white">Reply</p>
@@ -168,9 +202,9 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
         </div>
 
         {/* Sender card */}
-        <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30">
+        <div className="px-6 py-3 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 shrink-0">
           <div className="flex items-center gap-3">
-            <div className={cn('w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0 bg-gradient-to-br shadow-sm', gradient)}>
+            <div className={cn('w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0 bg-gradient-to-br shadow-sm', gradient)}>
               {initials}
             </div>
             <div className="min-w-0">
@@ -182,26 +216,26 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
           </div>
         </div>
 
-        {/* To / Subject fields */}
-        <div className="px-6 py-3 border-b border-slate-100 dark:border-slate-800 space-y-2">
+        {/* To / Subject */}
+        <div className="px-6 py-3 border-b border-slate-100 dark:border-slate-800 space-y-1.5 shrink-0">
           <div className="flex items-center gap-3 text-sm">
-            <span className="text-slate-400 dark:text-slate-500 font-medium w-14 shrink-0">To</span>
-            <span className="text-slate-700 dark:text-slate-300 truncate">
+            <span className="text-slate-400 dark:text-slate-500 font-medium w-14 shrink-0 text-xs">To</span>
+            <span className="text-slate-700 dark:text-slate-300 truncate text-sm">
               {email.from_name ? `${email.from_name} <${email.from_email}>` : email.from_email}
             </span>
           </div>
           <div className="flex items-center gap-3 text-sm">
-            <span className="text-slate-400 dark:text-slate-500 font-medium w-14 shrink-0">Subject</span>
-            <span className="text-slate-700 dark:text-slate-300 truncate font-medium">
+            <span className="text-slate-400 dark:text-slate-500 font-medium w-14 shrink-0 text-xs">Subject</span>
+            <span className="text-slate-700 dark:text-slate-300 truncate font-medium text-sm">
               {email.subject ? `Re: ${email.subject}` : 'Re: (No subject)'}
             </span>
           </div>
         </div>
 
-        {/* Compose area */}
-        <div className="px-6 py-4">
+        {/* Compose area — scrollable */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3 min-h-0">
           {sent ? (
-            <div className="flex flex-col items-center justify-center py-8 gap-3">
+            <div className="flex flex-col items-center justify-center py-10 gap-3">
               <div className="w-14 h-14 rounded-full bg-emerald-50 dark:bg-emerald-950/40 flex items-center justify-center">
                 <CheckCheck className="w-7 h-7 text-emerald-500" />
               </div>
@@ -209,44 +243,45 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
               <p className="text-xs text-slate-400">Closing…</p>
             </div>
           ) : (
-            <Textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              placeholder={`Write your reply to ${sender}…`}
-              rows={8}
-              disabled={sending}
-              className="resize-none text-sm bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 dark:text-slate-200 dark:placeholder:text-slate-600 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 dark:focus:border-blue-600 transition-all"
-            />
+            <>
+              <Textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                placeholder={`Write your reply to ${sender}…`}
+                rows={7}
+                disabled={sending || drafting}
+                className="w-full resize-none text-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 placeholder:text-slate-400 dark:placeholder:text-slate-600 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 dark:focus:border-blue-600 transition-all"
+              />
+
+              {/* Original snippet */}
+              {email.snippet && (
+                <div className="px-3 py-2.5 border-l-2 border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/30 rounded-r-lg">
+                  <p className="text-[11px] font-medium text-slate-400 dark:text-slate-500 mb-1">
+                    Original · {formatDate(email.received_at)}
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-500 leading-relaxed line-clamp-3">
+                    {email.snippet}
+                  </p>
+                </div>
+              )}
+            </>
           )}
 
-          {/* Original email snippet */}
-          {email.snippet && !sent && (
-            <div className="mt-3 px-3 py-2.5 border-l-2 border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/30 rounded-r-lg">
-              <p className="text-[11px] font-medium text-slate-400 dark:text-slate-500 mb-1">
-                Original · {formatDate(email.received_at)}
-              </p>
-              <p className="text-xs text-slate-500 dark:text-slate-500 leading-relaxed line-clamp-3">
-                {email.snippet}
-              </p>
-            </div>
-          )}
-
-          {/* Error */}
           {error && (
-            <div className="mt-3 flex items-start gap-2 px-3 py-2.5 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-xl">
+            <div className="flex items-start gap-2 px-3 py-2.5 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 rounded-xl">
               <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
               <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
             </div>
           )}
         </div>
 
-        {/* Footer actions */}
+        {/* Footer */}
         {!sent && (
-          <div className="flex items-center gap-3 px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-800/20">
+          <div className="flex items-center gap-2 px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/20 shrink-0 flex-wrap">
             <Button
               onClick={handleSend}
-              disabled={!body.trim() || sending}
-              className="gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-semibold px-6 rounded-xl"
+              disabled={!body.trim() || sending || drafting}
+              className="gap-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-semibold px-5 rounded-xl"
             >
               {sending ? (
                 <><Loader2 className="w-4 h-4 animate-spin" />Sending…</>
@@ -255,19 +290,30 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
               )}
             </Button>
             <Button
+              onClick={handleDraft}
+              disabled={drafting || sending}
+              variant="outline"
+              className="gap-2 rounded-xl border-violet-200 dark:border-violet-700 text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-900/20 px-4"
+            >
+              {drafting ? (
+                <><Loader2 className="w-4 h-4 animate-spin" />Drafting…</>
+              ) : (
+                <><Sparkles className="w-4 h-4" />AI Draft</>
+              )}
+            </Button>
+            <Button
               variant="outline"
               onClick={onClose}
               disabled={sending}
-              className="px-5 rounded-xl dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="px-4 rounded-xl dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               Cancel
             </Button>
             <p className="text-[11px] text-slate-400 ml-auto">Sent via Gmail API</p>
           </div>
         )}
-        </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>
   )
 }
 

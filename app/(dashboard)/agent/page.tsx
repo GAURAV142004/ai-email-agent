@@ -185,7 +185,8 @@ export default function AgentPage() {
   const [currentConvId, setCurrentConvId] = useState<string | null>(null)
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [convsLoading, setConvsLoading] = useState(false)
+  const [msgsLoading, setMsgsLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [showFormatSelector, setShowFormatSelector] = useState(false)
   const [pendingQuery, setPendingQuery] = useState<string | null>(null)
@@ -203,25 +204,26 @@ export default function AgentPage() {
   }, [messages, generating])
 
   const fetchConversations = useCallback(async () => {
-    setLoading(true)
+    setConvsLoading(true)
     try {
       const res = await fetch('/api/agent/conversations')
       const data = await res.json()
       setConversations(data.conversations ?? [])
     } finally {
-      setLoading(false)
+      setConvsLoading(false)
     }
   }, [])
 
   async function loadConversation(id: string) {
     setCurrentConvId(id)
-    setLoading(true)
+    setMsgsLoading(true)
+    setMessages([])
     try {
       const res = await fetch(`/api/agent/conversations/${id}`)
       const data = await res.json()
       setMessages(data.messages ?? [])
     } finally {
-      setLoading(false)
+      setMsgsLoading(false)
     }
   }
 
@@ -372,7 +374,7 @@ export default function AgentPage() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && e.ctrlKey) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
     }
@@ -404,12 +406,12 @@ export default function AgentPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-            {loading && conversations.length === 0 && (
+            {convsLoading && conversations.length === 0 && (
               <div className="flex justify-center py-8">
                 <RefreshCw className="w-4 h-4 text-slate-400 animate-spin" />
               </div>
             )}
-            {!loading && conversations.length === 0 && (
+            {!convsLoading && conversations.length === 0 && (
               <p className="text-xs text-slate-400 text-center py-8 px-4 leading-relaxed">
                 No conversations yet.
                 <br />
@@ -461,8 +463,18 @@ export default function AgentPage() {
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
 
+            {/* Loading history */}
+            {msgsLoading && (
+              <div className="flex justify-center py-16">
+                <div className="flex flex-col items-center gap-3">
+                  <RefreshCw className="w-6 h-6 text-blue-500 animate-spin" />
+                  <p className="text-xs text-slate-400">Loading conversation…</p>
+                </div>
+              </div>
+            )}
+
             {/* Empty state */}
-            {messages.length === 0 && !generating && (
+            {messages.length === 0 && !generating && !msgsLoading && (
               <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto">
                 <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mb-5 shadow-lg shadow-blue-500/30">
                   <Sparkles className="w-8 h-8 text-white" />
@@ -571,7 +583,7 @@ export default function AgentPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask anything about your team's project activity… (Ctrl+Enter to send)"
+                placeholder="Ask anything about your team's project activity…"
                 rows={2}
                 className="flex-1 resize-none rounded-xl border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-800 dark:text-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 dark:focus:border-blue-600 transition-all"
                 style={{ minHeight: '52px', maxHeight: '140px' }}
@@ -590,7 +602,7 @@ export default function AgentPage() {
               </Button>
             </div>
             <p className="text-[11px] text-slate-400 text-center">
-              Ctrl+Enter to send · Enter for new line · Type &quot;report&quot; or &quot;excel&quot; to export data
+              Enter to send · Shift+Enter for new line · Type &quot;report&quot; or &quot;excel&quot; to export data
             </p>
           </div>
         </main>

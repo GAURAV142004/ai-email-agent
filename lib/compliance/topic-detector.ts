@@ -47,7 +47,7 @@ const PERSONAL_TOPIC_PATTERNS: Array<{ topic: string; patterns: RegExp[] }> = [
   {
     topic: 'religion_caste',
     patterns: [
-      /\b(religion|caste|community|sect|temple|mosque|church|prayer|fasting)\b/i,
+      /\b(religion|caste|sect|temple|mosque|church|prayer)\b/i,
       /\b(hindu|muslim|christian|sikh|buddhist|jain)\b/i,
     ],
   },

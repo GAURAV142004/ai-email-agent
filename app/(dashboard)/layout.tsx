@@ -27,7 +27,7 @@ async function checkConsent(cookieHeader: string): Promise<boolean> {
 
     if (!res.ok) return false
     const data = await res.json()
-    return data.consent_given === true
+    return data.consentGiven === true
   } catch {
     // If the check itself fails (e.g. during build) we allow through —
     // client-side guards will catch it.

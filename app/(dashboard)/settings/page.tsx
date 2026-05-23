@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from 'react'
 import { useSession } from 'next-auth/react'
+import Link from 'next/link'
 import {
   Mail, RefreshCw, AlertCircle, AlertTriangle, CheckCircle2,
-  Settings2, Shield, Clock, Database, Zap,
+  Shield, Clock, Database, Zap, ChevronRight,
 } from 'lucide-react'
 import { Header } from '@/components/layout/Header'
 import { Button } from '@/components/ui/button'
@@ -410,13 +411,44 @@ export default function SettingsPage() {
           )}
         </SectionCard>
 
-        {/* ── Section 3: Data & Privacy ─────────────────────────────────────── */}
+        {/* ── Section 3: Classification Rules (delivery_lead only) ────────── */}
+        {isDeliveryLead && (
+          <SectionCard
+            icon={Shield}
+            iconClass="bg-blue-50 dark:bg-blue-500/10 text-blue-500"
+            title="Email Classification Rules"
+            subtitle="Control which emails are indexed into the KB"
+            delay={140}
+          >
+            <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+              Classification rules determine which emails from your team's inboxes are indexed
+              into the project knowledge base. Rules are checked before AI classification — matched
+              emails are indexed immediately without an LLM call.
+            </p>
+            <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+              Add <strong className="text-slate-700 dark:text-slate-300">client domains</strong> (e.g.{' '}
+              <code className="text-xs bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded font-mono">infosys.com</code>),
+              specific sender emails, subject keywords, or enable AI inference to automatically
+              classify ambiguous emails.
+            </p>
+            <Link
+              href="/settings/classification"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition-colors"
+            >
+              <Shield className="w-4 h-4" />
+              Manage Classification Rules
+              <ChevronRight className="w-4 h-4 ml-1" />
+            </Link>
+          </SectionCard>
+        )}
+
+        {/* ── Section 4: Data & Privacy ─────────────────────────────────────── */}
         <SectionCard
           icon={Shield}
           iconClass="bg-slate-50 dark:bg-slate-800 text-slate-500"
           title="Data & Privacy"
           subtitle="Retention policy and consent information"
-          delay={140}
+          delay={210}
         >
           {/* Retention */}
           <div className="flex items-start gap-3 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-100 dark:border-slate-800">

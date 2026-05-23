@@ -144,7 +144,8 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
 
   return (
     <Dialog open={!!email} onOpenChange={(open) => { if (!open && !sending) onClose() }}>
-      <DialogContent showCloseButton={false} className="max-w-2xl sm:max-w-2xl p-0 overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-2xl">
+      <DialogContent showCloseButton={false} className="max-w-2xl sm:max-w-2xl p-0 gap-0 overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl shadow-2xl">
+        <div className="flex flex-col">
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
@@ -264,6 +265,7 @@ function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
             <p className="text-[11px] text-slate-400 ml-auto">Sent via Gmail API</p>
           </div>
         )}
+        </div>
       </DialogContent>
     </Dialog>
   )

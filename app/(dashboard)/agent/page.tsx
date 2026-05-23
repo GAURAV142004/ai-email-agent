@@ -269,12 +269,12 @@ export default function AgentPage() {
       const res = await fetch('/api/agent/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, conversation_id: currentConvId }),
+        body: JSON.stringify({ question: query, conversationId: currentConvId }),
       })
       const data = await res.json()
 
-      if (!currentConvId && data.conversation_id) {
-        setCurrentConvId(data.conversation_id)
+      if (!currentConvId && data.conversationId) {
+        setCurrentConvId(data.conversationId)
         fetchConversations()
       }
 
@@ -289,7 +289,7 @@ export default function AgentPage() {
               query,
               answer: data.answer,
               format,
-              conversation_id: data.conversation_id,
+              conversation_id: data.conversationId,
             }),
           })
           if (docRes.ok) {
@@ -320,7 +320,7 @@ export default function AgentPage() {
 
       const assistantMsg: AgentMessage = {
         id: data.message_id ?? 'a-' + Date.now(),
-        conversation_id: data.conversation_id ?? currentConvId ?? '',
+        conversation_id: data.conversationId ?? currentConvId ?? '',
         role: 'assistant',
         content: data.answer ?? data.blockReason ?? 'No response received.',
         kb_entries_referenced: data.kbEntriesUsed ?? 0,

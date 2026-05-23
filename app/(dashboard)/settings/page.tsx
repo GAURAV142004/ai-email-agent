@@ -183,11 +183,8 @@ export default function SettingsPage() {
     setKbSyncing(true)
     setKbMsg(null)
     try {
-      const res = await fetch('/api/cron/kb-sync', {
+      const res = await fetch('/api/admin/trigger-kb-sync', {
         method: 'POST',
-        headers: {
-          'x-cron-secret': process.env.NEXT_PUBLIC_CRON_SECRET ?? '',
-        },
       })
       const data = await res.json()
       if (res.ok) {

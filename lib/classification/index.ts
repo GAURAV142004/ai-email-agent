@@ -1,48 +1,51 @@
 import { EmailClassificationRule, ClassificationResult } from '@/lib/supabase/types'
-import { applyRules, aiInferenceEnabled } from './rules-engine'
+import { applyRules } from './rules-engine'
 import { classifyWithAI } from './ai-classifier'
 
 /**
  * Combined classification pipeline.
- * 1. Apply admin-configured rules (deterministic, free)
- * 2. If no rule matches and AI inference is enabled → call Bedrock
- * 3. Default: not project-related (privacy-first)
+ * 1. Apply admin-configured rules first (deterministic, free, instant)
+ * 2. If no rule matches → always fall back to AI inference (privacy-first prompt)
+ *
+ * NOTE: We no longer gate AI inference on an explicit "ai_inference" rule.
+ * Admin rules are for allowlisting known domains/senders.
+ * AI is the intelligent fallback for everything else.
  */
 export async function classifyEmail(
   rules: EmailClassificationRule[],
   params: {
     fromEmail: string
-    toEmail: string
-    subject: string
-    snippet: string
+    toEmail:   string
+    subject:   string
+    snippet:   string
   },
 ): Promise<ClassificationResult> {
-  // Step 1: rule-based
+  // Step 1: deterministic rule-based check (free, fast)
   const ruleResult = applyRules(rules, params)
   if (ruleResult.matched) {
     return {
       isProjectRelated: true,
-      confidence: 1.0,
-      reason: ruleResult.reason!,
-      detectedProject: null,
-      source: 'rule',
+      confidence:       1.0,
+      reason:           ruleResult.reason!,
+      detectedProject:  null,
+      source:           'rule',
     }
   }
 
-  // Step 2: AI inference (if enabled)
-  if (aiInferenceEnabled(rules)) {
+  // Step 2: AI inference — always called when no rule matches
+  // The AI prompt is privacy-first: defaults to NOT project-related when uncertain
+  try {
     const aiResult = await classifyWithAI(params)
-    // Combine source tag if both were used
     return { ...aiResult, source: 'ai' }
-  }
-
-  // Step 3: default — not project-related
-  return {
-    isProjectRelated: false,
-    confidence: 1.0,
-    reason: 'No matching rule and AI inference is disabled',
-    detectedProject: null,
-    source: 'rule',
+  } catch {
+    // On Bedrock failure default to NOT project-related (privacy-first)
+    return {
+      isProjectRelated: false,
+      confidence:       0,
+      reason:           'AI classification unavailable — defaulting to personal',
+      detectedProject:  null,
+      source:           'ai',
+    }
   }
 }
 

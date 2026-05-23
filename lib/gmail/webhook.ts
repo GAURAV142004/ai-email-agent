@@ -82,7 +82,7 @@ export async function processWebhookNotification(notification: PubSubMessage): P
     .eq('id', account.id)
 
   // Fetch new thread IDs from Gmail history since the previous cursor
-  const threadIds = await fetchNewMessages(
+  const { threadIds } = await fetchNewMessages(
     accessToken,
     startHistoryId,
     refreshToken

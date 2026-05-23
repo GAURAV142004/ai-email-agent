@@ -179,16 +179,24 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleKbSync() {
+  async function handleKbSync(bootstrap = false) {
     setKbSyncing(true)
     setKbMsg(null)
     try {
-      const res = await fetch('/api/admin/trigger-kb-sync', {
-        method: 'POST',
-      })
+      const url = bootstrap
+        ? '/api/admin/trigger-kb-sync?bootstrap=true&days=30'
+        : '/api/admin/trigger-kb-sync'
+      const res  = await fetch(url, { method: 'POST' })
       const data = await res.json()
       if (res.ok) {
-        setKbMsg('Knowledge base sync triggered successfully.')
+        const kb  = data.totalKBEntriesAdded ?? 0
+        const pi  = data.totalPersonalAdded  ?? 0
+        const tot = data.totalEmailsProcessed ?? 0
+        setKbMsg(
+          bootstrap
+            ? `Bootstrap done — ${tot} emails scanned, ${kb} added to KB, ${pi} to inbox.`
+            : `Sync done — ${kb} KB entries added, ${pi} inbox emails.`,
+        )
         setLastKbSync(new Date().toISOString())
       } else {
         setKbMsg(data.error ?? 'KB sync failed.')
@@ -346,19 +354,33 @@ export default function SettingsPage() {
           {isDeliveryLead && (
             <>
               <Separator />
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">
-                  Admin — Manual Trigger
+                  Admin — Manual Controls
                 </p>
-                <Button
-                  onClick={handleKbSync}
-                  disabled={kbSyncing}
-                  variant="outline"
-                  className="gap-2 rounded-xl text-sm h-9 border-violet-200 dark:border-violet-700 text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-900/20"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${kbSyncing ? 'animate-spin' : ''}`} />
-                  {kbSyncing ? 'Syncing KB…' : 'Trigger KB Sync'}
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() => handleKbSync(false)}
+                    disabled={kbSyncing}
+                    variant="outline"
+                    className="gap-2 rounded-xl text-sm h-9 border-violet-200 dark:border-violet-700 text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-900/20"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${kbSyncing ? 'animate-spin' : ''}`} />
+                    {kbSyncing ? 'Syncing…' : 'Sync New Emails'}
+                  </Button>
+                  <Button
+                    onClick={() => handleKbSync(true)}
+                    disabled={kbSyncing}
+                    className="gap-2 rounded-xl text-sm h-9 bg-violet-600 hover:bg-violet-700 text-white"
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    {kbSyncing ? 'Running…' : 'Bootstrap Last 30 Days'}
+                  </Button>
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  <strong className="text-slate-500 dark:text-slate-400">Sync New Emails</strong> — processes emails received since last sync.<br />
+                  <strong className="text-slate-500 dark:text-slate-400">Bootstrap Last 30 Days</strong> — use this first time to populate the KB with recent emails.
+                </p>
               </div>
             </>
           )}

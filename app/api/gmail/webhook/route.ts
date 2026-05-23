@@ -79,11 +79,22 @@ async function processWebhookDualPath(notification: PubSubMessage): Promise<void
 
   // 5. Fetch thread IDs added since startHistoryId
   let threadIds: string[]
+  let newHistoryId: string | null = null
   try {
-    threadIds = await fetchNewMessages(accessToken, startHistoryId, refreshToken)
+    const result = await fetchNewMessages(accessToken, startHistoryId, refreshToken)
+    threadIds    = result.threadIds
+    newHistoryId = result.newHistoryId
   } catch (err) {
     console.error('[Webhook] fetchNewMessages failed:', err)
     return
+  }
+
+  // Advance cursor to what Gmail actually returned (more accurate than the notification's historyId)
+  if (newHistoryId && newHistoryId !== notification.historyId) {
+    await supabase
+      .from('team_members')
+      .update({ last_history_id: newHistoryId })
+      .eq('id', member.id)
   }
 
   // 6. Load active classification rules for PATH A (KB indexing)

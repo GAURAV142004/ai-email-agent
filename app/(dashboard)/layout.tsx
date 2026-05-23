@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation'
+import { cookies } from 'next/headers'
 import { getServerSession } from 'next-auth/next'
 import { authOptions } from '@/app/api/auth/[...nextauth]/route'
 import { DashboardShell } from '@/components/layout/DashboardShell'
@@ -47,9 +48,6 @@ export default async function DashboardLayout({
   }
 
   // 2. Check consent — forward the session cookie to the API route
-  const { cookies } = await import('next/headers')
-  // In Next.js 15 cookies() is async; in 13/14 it returns synchronously.
-  // Using `await` works for both.
   const cookieStore = await cookies()
   const cookieHeader = cookieStore
     .getAll()

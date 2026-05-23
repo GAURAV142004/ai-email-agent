@@ -213,3 +213,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     totalSkipped,
   })
 }
+
+// Vercel cron jobs send GET requests — alias to POST handler
+export const GET = POST

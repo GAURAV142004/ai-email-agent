@@ -38,7 +38,7 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
   const {
     bootstrap = false,
     daysBack  = 30,
-    maxThreadsPerMember = bootstrap ? 50 : 200,
+    maxThreadsPerMember = bootstrap ? 500 : 200,
   } = params
 
   const supabase = getServiceSupabase()

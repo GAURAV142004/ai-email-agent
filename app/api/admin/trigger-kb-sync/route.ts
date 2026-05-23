@@ -16,12 +16,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const bootstrap = url.searchParams.get('bootstrap') === 'true'
   const daysBack  = parseInt(url.searchParams.get('days') ?? '30', 10)
 
+  const maxThreads = parseInt(url.searchParams.get('maxThreads') ?? '0', 10)
+
   // Run sync directly — no internal HTTP call needed
   const result = await runKBSync({
     bootstrap,
     daysBack,
-    // Limit threads per member for admin-triggered sync to avoid Vercel timeout
-    maxThreadsPerMember: bootstrap ? 30 : 100,
+    // Bootstrap scans up to 500 threads per member to build a rich KB.
+    // Pass ?maxThreads=N to override. Incremental sync caps at 200.
+    maxThreadsPerMember: maxThreads > 0 ? maxThreads : bootstrap ? 500 : 200,
   })
 
   return NextResponse.json(result)

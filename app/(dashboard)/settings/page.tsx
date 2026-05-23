@@ -110,6 +110,7 @@ export default function SettingsPage() {
   const [lastKbSync, setLastKbSync] = useState<string | null>(null)
   const [kbEntryCount, setKbEntryCount] = useState<number | null>(null)
   const [kbSyncErrors, setKbSyncErrors] = useState<string[]>([])
+  const [bootstrapDays, setBootstrapDays] = useState<number>(90)
 
   // Consent state
   const [consentAt, setConsentAt] = useState<string | null>(null)
@@ -188,7 +189,7 @@ export default function SettingsPage() {
     setKbMsg(null)
     try {
       const url = bootstrap
-        ? '/api/admin/trigger-kb-sync?bootstrap=true&days=30'
+        ? `/api/admin/trigger-kb-sync?bootstrap=true&days=${bootstrapDays}`
         : '/api/admin/trigger-kb-sync'
       const res  = await fetch(url, { method: 'POST' })
       const data = await res.json()
@@ -202,6 +203,7 @@ export default function SettingsPage() {
             : `Sync done — ${kb} KB entries added, ${pi} inbox emails.`,
         )
         setLastKbSync(new Date().toISOString())
+        if (data.kbSync?.totalKBEntries != null) setKbEntryCount(data.kbSync.totalKBEntries)
       } else {
         setKbMsg(data.error ?? 'KB sync failed.')
       }
@@ -383,6 +385,28 @@ export default function SettingsPage() {
                 <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">
                   Admin — Manual Controls
                 </p>
+
+                {/* Bootstrap days selector */}
+                <div className="flex items-center gap-3">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 shrink-0">Bootstrap window:</p>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {[30, 90, 180, 365].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setBootstrapDays(d)}
+                        className={`px-3 py-1 text-xs font-medium rounded-lg border transition-colors ${
+                          bootstrapDays === d
+                            ? 'bg-violet-600 border-violet-600 text-white'
+                            : 'border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:border-violet-400 hover:text-violet-600 dark:hover:text-violet-400'
+                        }`}
+                      >
+                        {d}d
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="flex flex-wrap gap-2">
                   <Button
                     onClick={() => handleKbSync(false)}
@@ -399,12 +423,12 @@ export default function SettingsPage() {
                     className="gap-2 rounded-xl text-sm h-9 bg-violet-600 hover:bg-violet-700 text-white"
                   >
                     <Database className="w-3.5 h-3.5" />
-                    {kbSyncing ? 'Running…' : 'Bootstrap Last 30 Days'}
+                    {kbSyncing ? 'Running…' : `Bootstrap Last ${bootstrapDays} Days`}
                   </Button>
                 </div>
                 <p className="text-xs text-slate-400 leading-relaxed">
                   <strong className="text-slate-500 dark:text-slate-400">Sync New Emails</strong> — processes emails received since last sync.<br />
-                  <strong className="text-slate-500 dark:text-slate-400">Bootstrap Last 30 Days</strong> — use this first time to populate the KB with recent emails.
+                  <strong className="text-slate-500 dark:text-slate-400">Bootstrap</strong> — scans all threads in the selected window across every team member. Use a longer window for a richer KB. This may take several minutes.
                 </p>
               </div>
             </>

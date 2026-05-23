@@ -45,19 +45,27 @@ export async function GET(): Promise<NextResponse> {
   // KB sync status
   const { data: lastSync } = await supabase
     .from('kb_sync_jobs')
-    .select('status, completed_at, kb_entries_added')
+    .select('status, completed_at, kb_entries_added, errors')
     .eq('member_id', member.id)
     .eq('status', 'completed')
     .order('completed_at', { ascending: false })
     .limit(1)
     .single()
 
+  // Total KB entries for this member
+  const { count: kbCount } = await supabase
+    .from('email_knowledge_base')
+    .select('id', { count: 'exact', head: true })
+    .eq('owner_member_id', member.id)
+
   return NextResponse.json({
     inbox:   inboxStats,
     todos:   todoStats,
     kbSync:  {
-      lastSyncAt:      lastSync?.completed_at ?? null,
+      lastSyncAt:       lastSync?.completed_at ?? null,
       lastEntriesAdded: lastSync?.kb_entries_added ?? 0,
+      lastSyncErrors:   (lastSync?.errors as string[] | null) ?? [],
+      totalKBEntries:   kbCount ?? 0,
     },
   })
 }

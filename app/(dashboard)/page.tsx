@@ -311,7 +311,8 @@ export default function PersonalDashboardPage() {
   const fetchTodos = useCallback(async () => {
     setTodosLoading(true)
     try {
-      const res = await fetch('/api/personal/todos?date=today')
+      const today = new Date().toISOString().slice(0, 10)
+      const res = await fetch(`/api/personal/todos?date=${today}`)
       if (res.ok) {
         const data = await res.json()
         setTodos(data.todos ?? [])

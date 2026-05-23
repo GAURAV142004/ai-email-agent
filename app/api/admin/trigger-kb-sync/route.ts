@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
+import { runKBSync } from '@/lib/kb/run-sync'
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const session = await getServerSession(authOptions)
@@ -11,22 +12,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Forbidden — delivery_lead only' }, { status: 403 })
   }
 
-  // Forward optional ?bootstrap=true&days=30 params
-  const inUrl     = new URL(request.url)
-  const bootstrap = inUrl.searchParams.get('bootstrap') ?? 'false'
-  const days      = inUrl.searchParams.get('days') ?? '30'
+  const url       = new URL(request.url)
+  const bootstrap = url.searchParams.get('bootstrap') === 'true'
+  const daysBack  = parseInt(url.searchParams.get('days') ?? '30', 10)
 
-  const base = process.env.NEXTAUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
-
-  const target = new URL('/api/cron/kb-sync', base)
-  target.searchParams.set('bootstrap', bootstrap)
-  target.searchParams.set('days', days)
-
-  const res = await fetch(target.toString(), {
-    method:  'POST',
-    headers: { authorization: `Bearer ${process.env.CRON_SECRET}` },
+  // Run sync directly — no internal HTTP call needed
+  const result = await runKBSync({
+    bootstrap,
+    daysBack,
+    // Limit threads per member for admin-triggered sync to avoid Vercel timeout
+    maxThreadsPerMember: bootstrap ? 30 : 100,
   })
 
-  const data = await res.json().catch(() => ({}))
-  return NextResponse.json(data, { status: res.status })
+  return NextResponse.json(result)
 }

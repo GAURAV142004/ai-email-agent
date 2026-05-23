@@ -1,26 +1,199 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { decodePubSubMessage, processWebhookNotification } from '@/lib/gmail/webhook'
+import { getServiceSupabase } from '@/lib/auth'
+import { safeDecrypt } from '@/lib/crypto'
+import { fetchThread, fetchNewMessages } from '@/lib/gmail/thread'
+import { analyzeEmailThread } from '@/lib/ai/analyze'
+import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
+import { indexEmailToKB } from '@/lib/kb/indexer'
+import type { EmailClassificationRule } from '@/lib/supabase/types'
 
-// Google Pub/Sub push endpoint — receives Gmail notifications
-export async function POST(request: NextRequest): Promise<NextResponse> {
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+interface PubSubMessage {
+  emailAddress: string
+  historyId:    string
+}
+
+function decodePubSubMessage(body: unknown): PubSubMessage | null {
   try {
-    const body = await request.json()
-    const notification = decodePubSubMessage(body)
-
-    if (!notification) {
-      // Return 200 to acknowledge — Pub/Sub will retry on non-2xx
-      return NextResponse.json({ error: 'Invalid message' }, { status: 200 })
-    }
-
-    // Process asynchronously (don't await — Pub/Sub expects fast ACK)
-    processWebhookNotification(notification).catch((err) => {
-      console.error('Webhook processing error:', err)
-    })
-
-    return NextResponse.json({ ok: true })
-  } catch (err) {
-    console.error('Webhook error:', err)
-    // Return 200 to prevent Pub/Sub retry storm
-    return NextResponse.json({ error: 'Internal error' }, { status: 200 })
+    const message = (body as any)?.message
+    if (!message?.data) return null
+    const decoded = Buffer.from(message.data as string, 'base64').toString('utf-8')
+    return JSON.parse(decoded) as PubSubMessage
+  } catch {
+    return null
   }
+}
+
+function extractEmailAddress(from: string): string {
+  if (!from) return ''
+  const match = from.match(/<([^>]+)>/)
+  return match ? match[1].toLowerCase() : from.toLowerCase().trim()
+}
+
+function extractFromName(from: string): string {
+  return from.replace(/<.+?>/, '').trim().replace(/^"|"$/g, '') || ''
+}
+
+// ─── Dual-path async processor ───────────────────────────────────────────────
+
+async function processWebhookDualPath(notification: PubSubMessage): Promise<void> {
+  const supabase = getServiceSupabase()
+
+  // 1. Resolve team member by email address
+  const { data: member } = await supabase
+    .from('team_members')
+    .select('id, email, last_history_id')
+    .eq('email', notification.emailAddress)
+    .eq('is_active', true)
+    .single()
+
+  if (!member) {
+    console.error(`[Webhook] No active member for ${notification.emailAddress}`)
+    return
+  }
+
+  // 2. Load Gmail tokens
+  const { data: tokenRow } = await supabase
+    .from('member_gmail_tokens')
+    .select('access_token, refresh_token')
+    .eq('member_id', member.id)
+    .single()
+
+  if (!tokenRow?.access_token) {
+    console.error(`[Webhook] No tokens for member ${member.id}`)
+    return
+  }
+
+  const accessToken  = safeDecrypt(tokenRow.access_token)
+  const refreshToken = tokenRow.refresh_token ? safeDecrypt(tokenRow.refresh_token) : undefined
+
+  // 3. Determine history cursor (use stored value; fall back to notification.historyId)
+  const startHistoryId = member.last_history_id ?? notification.historyId
+
+  // 4. Advance cursor BEFORE processing so parallel notifications don't duplicate work
+  await supabase
+    .from('team_members')
+    .update({ last_history_id: notification.historyId })
+    .eq('id', member.id)
+
+  // 5. Fetch thread IDs added since startHistoryId
+  let threadIds: string[]
+  try {
+    threadIds = await fetchNewMessages(accessToken, startHistoryId, refreshToken)
+  } catch (err) {
+    console.error('[Webhook] fetchNewMessages failed:', err)
+    return
+  }
+
+  // 6. Load active classification rules for PATH A (KB indexing)
+  const { data: rulesData } = await supabase
+    .from('email_classification_rules')
+    .select('*')
+    .eq('is_active', true)
+
+  const rules: EmailClassificationRule[] = (rulesData as EmailClassificationRule[]) ?? []
+
+  // 7. Process each thread via both paths
+  for (const threadId of threadIds) {
+    try {
+      const thread = await fetchThread(threadId, accessToken, refreshToken)
+
+      const rawFrom   = thread.messages[0]?.from ?? ''
+      const fromEmail = extractEmailAddress(rawFrom) || thread.fromEmail
+      const fromName  = extractFromName(rawFrom)
+      const snippet   = thread.fullText.slice(0, 500)
+      const firstMsgId = thread.messages[0]?.messageId ?? ''
+
+      // ── PATH A: Knowledge Base indexing ──────────────────────────────────
+      // indexEmailToKB handles pre-filtering, classification, and dedup internally
+      try {
+        await indexEmailToKB(supabase, rules, {
+          memberId:       member.id,
+          gmailThreadId:  threadId,
+          gmailMessageId: firstMsgId,
+          fromEmail,
+          toEmail:        member.email,
+          subject:        thread.subject,
+          threadText:     thread.fullText,
+          snippet,
+          emailDate:      thread.receivedAt,
+          direction:      'inbound',
+        })
+      } catch (kbErr) {
+        console.error(`[Webhook] KB indexing failed for thread ${threadId}:`, kbErr)
+      }
+
+      // ── PATH B: Personal inbox ────────────────────────────────────────────
+      // Check if already stored
+      const { data: existingPersonal } = await supabase
+        .from('personal_inbox_emails')
+        .select('id')
+        .eq('member_id', member.id)
+        .eq('gmail_message_id', firstMsgId)
+        .maybeSingle()
+
+      if (existingPersonal) continue
+
+      // Pre-filter automated/newsletter senders
+      const preFilter = shouldSkipAIAnalysis(fromEmail, thread.subject, snippet)
+      if (preFilter.skip) continue
+
+      // AI analysis for personal inbox
+      let analysis: Awaited<ReturnType<typeof analyzeEmailThread>>
+      try {
+        analysis = await analyzeEmailThread(thread.fullText, thread.subject)
+      } catch (aiErr) {
+        console.error(`[Webhook] AI analysis failed for thread ${threadId}:`, aiErr)
+        continue
+      }
+
+      const expiresAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
+
+      await supabase.from('personal_inbox_emails').insert({
+        member_id:        member.id,
+        gmail_thread_id:  threadId,
+        gmail_message_id: firstMsgId,
+        subject:          thread.subject,
+        from_email:       fromEmail,
+        from_name:        fromName || null,
+        snippet:          snippet || null,
+        received_at:      thread.receivedAt,
+        is_read:          false,
+        ai_summary:       analysis.summary,
+        ai_priority:      analysis.priority,
+        is_actionable:    analysis.requiresAction,
+        reply_sent:       false,
+        expires_at:       expiresAt,
+      })
+    } catch (err) {
+      console.error(`[Webhook] Failed to process thread ${threadId}:`, err)
+    }
+  }
+}
+
+// ─── Route handler ────────────────────────────────────────────────────────────
+
+// Google Pub/Sub push endpoint — must ACK with 200 quickly to avoid retries
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    // Malformed payload — ACK so Pub/Sub doesn't retry
+    return NextResponse.json({ ok: false, error: 'Invalid JSON' }, { status: 200 })
+  }
+
+  const notification = decodePubSubMessage(body)
+  if (!notification) {
+    // ACK invalid/test messages so Pub/Sub stops retrying them
+    return NextResponse.json({ ok: false, error: 'Invalid message' }, { status: 200 })
+  }
+
+  // Fire-and-forget: fast ACK, process asynchronously
+  processWebhookDualPath(notification).catch((err) => {
+    console.error('[Webhook] Unhandled processing error:', err)
+  })
+
+  return NextResponse.json({ ok: true })
 }

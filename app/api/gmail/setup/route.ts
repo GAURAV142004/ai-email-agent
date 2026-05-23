@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { getAuthenticatedUser, getMemberFromSession, getServiceSupabase } from '@/lib/auth'
+import { NextResponse } from 'next/server'
+import { getMemberFromSession, getServiceSupabase } from '@/lib/auth'
 import { getGmailClient } from '@/lib/gmail/client'
 import { safeDecrypt } from '@/lib/crypto'
 
+// GET — return current watch status for the authenticated member
 export async function GET(): Promise<NextResponse> {
   const member = await getMemberFromSession()
   if (!member) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -15,71 +16,64 @@ export async function GET(): Promise<NextResponse> {
     .single()
 
   return NextResponse.json({
-    watch_expiry:    data?.watch_expiry ?? null,
+    watch_expiry:    data?.watch_expiry    ?? null,
     last_history_id: data?.last_history_id ?? null,
   })
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  const user = await getAuthenticatedUser()
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+// POST — set up (or renew) Gmail push watch for the authenticated member
+export async function POST(): Promise<NextResponse> {
+  const member = await getMemberFromSession()
+  if (!member) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const supabase = getServiceSupabase()
 
-  const { data: account } = await supabase
-    .from('connected_accounts')
-    .select('id, access_token, refresh_token')
-    .eq('user_id', user.id)
-    .eq('provider', 'gmail')
+  // Load Gmail tokens from member_gmail_tokens
+  const { data: tokenRow, error: tokenError } = await supabase
+    .from('member_gmail_tokens')
+    .select('access_token, refresh_token')
+    .eq('member_id', member.id)
     .single()
 
-  const acc = account as { id: string; access_token: string | null; refresh_token: string | null } | null
-  if (!acc?.access_token) {
-    return NextResponse.json({ error: 'No Gmail account connected' }, { status: 400 })
+  if (tokenError || !tokenRow?.access_token) {
+    return NextResponse.json(
+      { error: 'No Gmail tokens found. Please sign out and sign in again.' },
+      { status: 400 }
+    )
   }
 
-  const accessToken = safeDecrypt(acc.access_token)
-  const refreshToken = acc.refresh_token ? safeDecrypt(acc.refresh_token) : undefined
+  const accessToken  = safeDecrypt(tokenRow.access_token)
+  const refreshToken = tokenRow.refresh_token ? safeDecrypt(tokenRow.refresh_token) : undefined
 
   try {
     const gmail = getGmailClient(accessToken, refreshToken)
 
-    const watchResponse = await gmail.users.watch({
+    const watchRes = await gmail.users.watch({
       userId: 'me',
       requestBody: {
-        labelIds: ['INBOX'],
         topicName: process.env.GOOGLE_PUBSUB_TOPIC!,
+        labelIds:  ['INBOX'],
       },
     })
 
-    const expiry = watchResponse.data.expiration
-      ? new Date(parseInt(watchResponse.data.expiration)).toISOString()
+    const watchExpiry = watchRes.data.expiration
+      ? new Date(Number(watchRes.data.expiration)).toISOString()
       : null
 
+    const historyId = watchRes.data.historyId ?? null
+
+    // Persist watch metadata to team_members
     await supabase
-      .from('connected_accounts')
+      .from('team_members')
       .update({
-        watch_expiry: expiry,
-        status: 'active',
-        last_history_id: watchResponse.data.historyId ?? null,
+        watch_expiry:    watchExpiry,
+        last_history_id: historyId,
       })
-      .eq('id', acc.id)
+      .eq('id', member.id)
 
-    // Also update team_members so Settings page reflects status immediately
-    const member = await getMemberFromSession()
-    if (member) {
-      await supabase
-        .from('team_members')
-        .update({
-          watch_expiry:    expiry,
-          last_history_id: watchResponse.data.historyId ?? null,
-        })
-        .eq('id', member.id)
-    }
-
-    return NextResponse.json({ ok: true, historyId: watchResponse.data.historyId, expiry })
+    return NextResponse.json({ ok: true, watchExpiry, historyId })
   } catch (err) {
-    console.error('Gmail watch setup error:', err)
+    console.error('[Gmail Setup] Watch registration failed:', err)
     return NextResponse.json({ error: 'Failed to set up Gmail watch' }, { status: 500 })
   }
 }

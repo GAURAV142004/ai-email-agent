@@ -1,201 +1,138 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getMemberFromSession, getServiceSupabase } from '@/lib/auth'
-import { canReply, type TeamRole } from '@/lib/roles'
 import { sendGmailReply, getLastMessageId } from '@/lib/gmail/reply'
 import { safeDecrypt } from '@/lib/crypto'
-import { autoUpdateThreadTasks } from '@/lib/tasks/auto-update'
 
-// Simple in-memory rate limit: 5 replies per member per minute
-const replyRateLimitMap = new Map<string, { count: number; resetAt: number }>()
-
-function checkReplyRateLimit(memberId: string): boolean {
-  const now = Date.now()
-  const entry = replyRateLimitMap.get(memberId)
-  if (!entry || now > entry.resetAt) {
-    replyRateLimitMap.set(memberId, { count: 1, resetAt: now + 60_000 })
-    return true
-  }
-  if (entry.count >= 5) return false
-  entry.count++
-  return true
-}
+// ─── Request schema ───────────────────────────────────────────────────────────
 
 const ReplySchema = z.object({
-  threadDbId:    z.string().uuid(),
-  gmailThreadId: z.string(),
-  toEmail:       z.string().email(),
-  subject:       z.string().min(1),
-  bodyHtml:      z.string().min(1),
+  personalEmailId: z.string().uuid('personalEmailId must be a UUID'),
+  toEmail:         z.string().email('toEmail must be a valid email address'),
+  subject:         z.string().min(1, 'subject is required'),
+  bodyHtml:        z.string().min(1, 'bodyHtml is required'),
 })
 
+// ─── Route handler ────────────────────────────────────────────────────────────
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Auth check
   const member = await getMemberFromSession()
   if (!member) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  if (!checkReplyRateLimit(member.id)) {
+  // Parse + validate body
+  let rawBody: unknown
+  try {
+    rawBody = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  const parsed = ReplySchema.safeParse(rawBody)
+  if (!parsed.success) {
     return NextResponse.json(
-      { error: 'Too many replies. Please wait a minute.' },
-      { status: 429 }
+      { error: 'Invalid request', issues: parsed.error.issues },
+      { status: 400 }
     )
   }
 
-  const body = await request.json()
-  const parsed = ReplySchema.safeParse(body)
-  if (!parsed.success) {
-    return NextResponse.json({ error: 'Invalid request', issues: parsed.error.issues }, { status: 400 })
-  }
-
-  const { threadDbId, gmailThreadId, toEmail, subject, bodyHtml } = parsed.data
+  const { personalEmailId, toEmail, subject, bodyHtml } = parsed.data
   const supabase = getServiceSupabase()
 
-  // Fetch thread + owner role for permission check
-  const { data: thread, error: threadError } = await supabase
-    .from('email_threads')
-    .select('id, thread_id, subject, received_at, owner_member_id, owner:team_members!owner_member_id(role)')
-    .eq('id', threadDbId)
+  // Load the personal inbox record and verify ownership
+  const { data: personalEmail, error: fetchError } = await supabase
+    .from('personal_inbox_emails')
+    .select('id, member_id, gmail_thread_id, gmail_message_id, reply_sent')
+    .eq('id', personalEmailId)
     .single()
 
-  if (threadError || !thread) {
-    return NextResponse.json({ error: 'Thread not found' }, { status: 404 })
+  if (fetchError || !personalEmail) {
+    return NextResponse.json({ error: 'Email not found' }, { status: 404 })
   }
 
-  const ownerRole = (thread as any).owner?.role as TeamRole
-  if (!canReply(member.role, ownerRole)) {
+  if (personalEmail.member_id !== member.id) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  // Resolve Gmail tokens — member_gmail_tokens first, connected_accounts as fallback
-  let accessToken: string | null = null
-  let refreshToken: string | null = null
+  if (personalEmail.reply_sent) {
+    return NextResponse.json(
+      { error: 'A reply has already been sent for this email' },
+      { status: 409 }
+    )
+  }
 
-  const { data: memberToken } = await supabase
+  // Load Gmail tokens for this member
+  const { data: tokenRow, error: tokenError } = await supabase
     .from('member_gmail_tokens')
     .select('access_token, refresh_token')
     .eq('member_id', member.id)
-    .maybeSingle()
+    .single()
 
-  if (memberToken) {
-    accessToken  = safeDecrypt((memberToken as any).access_token)
-    refreshToken = safeDecrypt((memberToken as any).refresh_token)
-  } else {
-    const { data: account } = await supabase
-      .from('connected_accounts')
-      .select('access_token, refresh_token')
-      .eq('email', member.email)
-      .eq('status', 'active')
-      .maybeSingle()
-    const raw = account as any
-    accessToken  = raw?.access_token ? safeDecrypt(raw.access_token) : null
-    refreshToken = raw?.refresh_token ? safeDecrypt(raw.refresh_token) : null
+  if (tokenError || !tokenRow?.access_token) {
+    return NextResponse.json(
+      { error: 'Gmail not connected. Please sign out and sign in again.' },
+      { status: 422 }
+    )
   }
 
-  if (!accessToken || !refreshToken) {
-    return NextResponse.json({ error: 'Gmail not connected for this member' }, { status: 422 })
+  const accessToken  = safeDecrypt(tokenRow.access_token)
+  const refreshToken = tokenRow.refresh_token ? safeDecrypt(tokenRow.refresh_token) : ''
+
+  if (!refreshToken) {
+    return NextResponse.json(
+      { error: 'Gmail refresh token missing. Please re-authenticate.' },
+      { status: 422 }
+    )
   }
 
-  // Get In-Reply-To message ID
-  const inReplyToMessageId = await getLastMessageId(accessToken, refreshToken, gmailThreadId)
-  if (!inReplyToMessageId) {
-    return NextResponse.json({ error: 'Could not determine reply-to message ID' }, { status: 422 })
-  }
+  const gmailThreadId = personalEmail.gmail_thread_id
 
-  // Send via Gmail API
-  const result = await sendGmailReply({
-    accessToken,
-    refreshToken,
-    gmailThreadId,
-    toEmail,
-    subject,
-    bodyHtml,
-    inReplyToMessageId,
-  })
-
-  // Record reply
-  await supabase.from('email_replies').insert({
-    thread_id:        threadDbId,
-    sent_by_member:   member.id,
-    to_email:         toEmail,
-    subject,
-    body:             bodyHtml,
-    gmail_message_id: result.messageId,
-  })
-
-  // Compute response time from last inbound message (fall back to thread received_at)
-  const sentAt = new Date()
-  const { data: lastInbound } = await supabase
-    .from('email_thread_messages')
-    .select('sent_at')
-    .eq('thread_id', threadDbId)
-    .eq('direction', 'inbound')
-    .order('sent_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  const lastInboundAt = lastInbound?.sent_at
-    ? new Date(lastInbound.sent_at)
-    : (thread as any).received_at
-      ? new Date((thread as any).received_at)
-      : null
-
-  const responseMinutes = lastInboundAt
-    ? Math.floor((sentAt.getTime() - lastInboundAt.getTime()) / 60_000)
-    : null
-
-  // Add to conversation timeline
-  const plainSnippet = bodyHtml.replace(/<[^>]+>/g, '').slice(0, 200)
-  await supabase.from('email_thread_messages').insert({
-    thread_id:        threadDbId,
-    owner_member_id:  member.id,
-    gmail_message_id: result.messageId,
-    direction:        'outbound',
-    from_email:       member.email,
-    from_name:        member.name,
-    subject,
-    snippet:          plainSnippet,
-    sent_at:          sentAt.toISOString(),
-    response_minutes: responseMinutes,
-    source:           'app',
-  })
-
-  // Recompute thread reply summary
-  const { data: outboundRows } = await supabase
-    .from('email_thread_messages')
-    .select('sent_at')
-    .eq('thread_id', threadDbId)
-    .eq('direction', 'outbound')
-    .order('sent_at', { ascending: true })
-
-  const { count: msgCount } = await supabase
-    .from('email_thread_messages')
-    .select('*', { count: 'exact', head: true })
-    .eq('thread_id', threadDbId)
-
-  // Update thread: mark replied + response time + summary counts
-  await supabase
-    .from('email_threads')
-    .update({
-      reply_status:          'replied',
-      replied_at:            sentAt.toISOString(),
-      response_minutes:      responseMinutes,
-      reply_count:           outboundRows?.length ?? 1,
-      first_replied_at:      outboundRows?.[0]?.sent_at ?? sentAt.toISOString(),
-      last_outbound_at:      sentAt.toISOString(),
-      message_count:         msgCount ?? undefined,
-      awaiting_reply_since:  null,   // member just replied — thread not awaiting
-      // Set first_response_minutes only on first reply
-      ...(outboundRows?.length === 1 && responseMinutes !== null && {
-        first_response_minutes: responseMinutes,
-      }),
-    })
-    .eq('id', threadDbId)
-
-  // Auto-update tasks when reply sent from app
+  // Get the In-Reply-To message ID (RFC 2822 Message-ID of the last message)
+  let inReplyToMessageId: string | null
   try {
-    await autoUpdateThreadTasks(threadDbId, 'reply_sent')
+    inReplyToMessageId = await getLastMessageId(accessToken, refreshToken, gmailThreadId)
   } catch (err) {
-    console.error('Task auto-update error:', err instanceof Error ? err.message : 'Unknown')
+    console.error('[Reply] getLastMessageId failed:', err)
+    return NextResponse.json(
+      { error: 'Could not retrieve message ID for reply threading' },
+      { status: 502 }
+    )
   }
 
-  return NextResponse.json({ success: true, messageId: result.messageId })
+  if (!inReplyToMessageId) {
+    return NextResponse.json(
+      { error: 'Could not determine the message to reply to' },
+      { status: 422 }
+    )
+  }
+
+  // Send the reply via Gmail API
+  let result: { messageId: string; threadId: string }
+  try {
+    result = await sendGmailReply({
+      accessToken,
+      refreshToken,
+      gmailThreadId,
+      toEmail,
+      subject,
+      bodyHtml,
+      inReplyToMessageId,
+    })
+  } catch (err) {
+    console.error('[Reply] sendGmailReply failed:', err)
+    return NextResponse.json({ error: 'Failed to send reply via Gmail' }, { status: 502 })
+  }
+
+  // Mark the inbox record as replied
+  const { error: updateError } = await supabase
+    .from('personal_inbox_emails')
+    .update({ reply_sent: true })
+    .eq('id', personalEmailId)
+
+  if (updateError) {
+    // Reply was sent — log the DB failure but don't surface a 500 to the caller
+    console.error('[Reply] Failed to update reply_sent flag:', updateError)
+  }
+
+  return NextResponse.json({ ok: true, messageId: result.messageId })
 }

@@ -4,180 +4,191 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import {
-  Sparkles, Send, Plus, Filter, X,
-  Mail, ChevronDown, ChevronUp,
-  CheckSquare, Calendar, ExternalLink,
-  Trash2, Clock,
+  Sparkles, Send, Plus, Trash2, Bot, User,
+  FileDown, RefreshCw, AlertTriangle, Clock,
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { cn } from '@/lib/utils'
 import { Header } from '@/components/layout/Header'
-import type {
-  AgentConversation, AgentMessage,
-  ActionItem, TimelineEvent,
-} from '@/lib/supabase/types'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import type { AgentConversation, AgentMessage } from '@/lib/supabase/types'
 
-// ── AssistantMessage component ─────────────────
-function AssistantMessage({
-  message,
-  onThreadClick,
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+function renderMarkdown(content: string): string {
+  return content
+    // Headers
+    .replace(/^### (.+)$/gm, '<h3 class="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-3 mb-1">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 class="text-base font-semibold text-slate-800 dark:text-slate-200 mt-4 mb-1.5">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 class="text-lg font-bold text-slate-800 dark:text-slate-200 mt-4 mb-2">$1</h1>')
+    // Bold
+    .replace(/\*\*(.+?)\*\*/g, '<strong class="font-semibold text-slate-800 dark:text-slate-100">$1</strong>')
+    // Italic
+    .replace(/\*(.+?)\*/g, '<em class="italic">$1</em>')
+    // Unordered list items
+    .replace(/^[-•] (.+)$/gm, '<li class="ml-4 list-disc text-sm text-slate-700 dark:text-slate-300 leading-relaxed">$1</li>')
+    // Ordered list items
+    .replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal text-sm text-slate-700 dark:text-slate-300 leading-relaxed">$1</li>')
+    // Wrap consecutive <li> in <ul>/<ol> — simple newline-based paragraphs
+    .replace(/(<li[^>]*>.*<\/li>\n?)+/g, (match) => `<ul class="my-2 space-y-1">${match}</ul>`)
+    // Remaining lines as paragraphs
+    .replace(/^(?!<[hul]|$)(.+)$/gm, '<p class="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">$1</p>')
+    // Clean up blank lines
+    .replace(/\n{2,}/g, '\n')
+}
+
+// ── Document format selector ──────────────────────────────────────────────────
+type DocFormat = 'xlsx' | 'csv' | 'pdf'
+
+function FormatSelector({
+  onSelect,
+  onCancel,
 }: {
-  message:       AgentMessage
-  onThreadClick: (t: any) => void
+  onSelect: (fmt: DocFormat) => void
+  onCancel: () => void
 }) {
-  const [showThreads,  setShowThreads]  = useState(false)
-  const [showActions,  setShowActions]  = useState(true)
-  const [showTimeline, setShowTimeline] = useState(false)
+  const [fmt, setFmt] = useState<DocFormat>('xlsx')
+  return (
+    <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-700 animate-fade-in">
+      <span className="text-xs font-medium text-blue-700 dark:text-blue-300 shrink-0">Export as:</span>
+      <Select value={fmt} onValueChange={(v) => setFmt(v as DocFormat)}>
+        <SelectTrigger className="h-8 w-28 text-xs border-blue-300 dark:border-blue-600">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="xlsx">Excel (.xlsx)</SelectItem>
+          <SelectItem value="csv">CSV (.csv)</SelectItem>
+          <SelectItem value="pdf">PDF (.pdf)</SelectItem>
+        </SelectContent>
+      </Select>
+      <Button
+        size="sm"
+        className="h-8 text-xs bg-blue-600 hover:bg-blue-700 text-white"
+        onClick={() => onSelect(fmt)}
+      >
+        Generate
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        className="h-8 text-xs"
+        onClick={onCancel}
+      >
+        Cancel
+      </Button>
+    </div>
+  )
+}
+
+// ── Assistant message component ───────────────────────────────────────────────
+function AssistantBubble({ message }: { message: AgentMessage }) {
+  const handleDownload = async () => {
+    if (!message.document_filename) return
+    const res = await fetch(`/api/documents/download?filename=${encodeURIComponent(message.document_filename)}`)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = message.document_filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  if (message.was_blocked) {
+    return (
+      <div className="flex items-start gap-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-xl">
+        <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+        <div>
+          <p className="text-sm font-medium text-red-700 dark:text-red-400">Response blocked</p>
+          {message.block_reason && (
+            <p className="text-xs text-red-500 dark:text-red-400 mt-0.5">{message.block_reason}</p>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className="space-y-4">
-      {/* Main text */}
-      <div className="text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
-        {message.content}
+    <div className="space-y-3">
+      {/* Main content */}
+      <div
+        className="text-sm leading-relaxed prose-sm max-w-none"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
+      />
+
+      {/* Meta row */}
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        {message.kb_entries_referenced > 0 && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 text-[11px] font-medium">
+            <Sparkles className="w-3 h-3" />
+            {message.kb_entries_referenced} KB {message.kb_entries_referenced === 1 ? 'entry' : 'entries'} used
+          </span>
+        )}
+        {message.project_clusters_referenced?.map((cluster) => (
+          <Badge
+            key={cluster}
+            className="bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700 text-[11px] px-2 py-0.5 rounded-full font-medium"
+          >
+            {cluster}
+          </Badge>
+        ))}
       </div>
 
-      {/* Emails analyzed */}
-      {(message.threads?.length ?? 0) > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowThreads(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <Mail className="w-3.5 h-3.5" />
-              {message.threads?.length} emails analyzed
-            </span>
-            {showThreads
-              ? <ChevronUp className="w-3.5 h-3.5" />
-              : <ChevronDown className="w-3.5 h-3.5" />
-            }
-          </button>
-          {showThreads && (
-            <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {message.threads?.map((t, i) => (
-                <button
-                  key={i}
-                  onClick={() => onThreadClick(t)}
-                  className="w-full text-left px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
-                >
-                  <p className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate">
-                    {t.subject || '(No subject)'}
-                  </p>
-                  <p className="text-[11px] text-slate-400 mt-0.5 truncate">
-                    {t.from} · {t.messageCount} msgs
-                  </p>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Action items */}
-      {message.action_items?.length > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowActions(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <CheckSquare className="w-3.5 h-3.5" />
-              {message.action_items.length} action items
-            </span>
-            {showActions
-              ? <ChevronUp className="w-3.5 h-3.5" />
-              : <ChevronDown className="w-3.5 h-3.5" />
-            }
-          </button>
-          {showActions && (
-            <div className="p-3 space-y-2">
-              {message.action_items.map((item: ActionItem, i: number) => (
-                <div key={i} className="flex items-start gap-2.5 p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800">
-                  <div className={cn(
-                    'w-1.5 h-1.5 rounded-full mt-1.5 shrink-0',
-                    item.priority === 'high'   ? 'bg-red-500'
-                    : item.priority === 'medium' ? 'bg-amber-500'
-                    : 'bg-green-500'
-                  )} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                      {item.task}
-                    </p>
-                    {(item.owner || item.due_date) && (
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {item.owner    && `👤 ${item.owner}`}
-                        {item.owner && item.due_date && ' · '}
-                        {item.due_date && `📅 ${item.due_date}`}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Timeline */}
-      {message.timeline?.length > 0 && (
-        <div className="border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
-          <button
-            onClick={() => setShowTimeline(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
-          >
-            <span className="flex items-center gap-2">
-              <Calendar className="w-3.5 h-3.5" />
-              Timeline ({message.timeline.length} events)
-            </span>
-            {showTimeline
-              ? <ChevronUp className="w-3.5 h-3.5" />
-              : <ChevronDown className="w-3.5 h-3.5" />
-            }
-          </button>
-          {showTimeline && (
-            <div className="p-4 space-y-3">
-              {[...message.timeline]
-                .sort((a: TimelineEvent, b: TimelineEvent) =>
-                  new Date(a.date).getTime() - new Date(b.date).getTime()
-                )
-                .map((ev: TimelineEvent, i: number) => (
-                  <div key={i} className="flex gap-3 items-start">
-                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 shrink-0" />
-                    <div>
-                      <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                        {ev.description}
-                      </p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {ev.date}
-                        {ev.from_email && ` · ${ev.from_email}`}
-                      </p>
-                    </div>
-                  </div>
-                ))
-              }
-            </div>
-          )}
-        </div>
+      {/* Download button for document responses */}
+      {message.response_type === 'document' && message.document_filename && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-2 h-8 text-xs border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+          onClick={handleDownload}
+        >
+          <FileDown className="w-3.5 h-3.5" />
+          Download {message.document_filename}
+        </Button>
       )}
     </div>
   )
 }
 
-// ── Main page ───────────────────────────────────
+// ── Quick prompts ─────────────────────────────────────────────────────────────
+const QUICK_PROMPTS = [
+  'Project status',
+  'Pending tasks',
+  'Open issues',
+  "This week's activity",
+]
+
+const DOC_KEYWORDS = ['excel', 'csv', 'pdf', 'report', 'sheet', 'export', 'download', 'spreadsheet']
+
+function hasDocumentKeyword(text: string): boolean {
+  const lower = text.toLowerCase()
+  return DOC_KEYWORDS.some((kw) => lower.includes(kw))
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 export default function AgentPage() {
   const { data: session, status } = useSession()
   const router = useRouter()
   const bottomRef = useRef<HTMLDivElement>(null)
-  const inputRef  = useRef<HTMLTextAreaElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  const [conversations,  setConversations]  = useState<AgentConversation[]>([])
-  const [currentConvId,  setCurrentConvId]  = useState<string | null>(null)
-  const [messages,       setMessages]       = useState<AgentMessage[]>([])
-  const [inputQuery,     setInputQuery]     = useState('')
-  const [isLoading,      setIsLoading]      = useState(false)
-  const [selectedThread, setSelectedThread] = useState<any | null>(null)
-  const [showFilters,    setShowFilters]    = useState(false)
-  const [filters, setFilters] = useState({ from: '', dateFrom: '', dateTo: '' })
+  const [conversations, setConversations] = useState<AgentConversation[]>([])
+  const [currentConvId, setCurrentConvId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<AgentMessage[]>([])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [showFormatSelector, setShowFormatSelector] = useState(false)
+  const [pendingQuery, setPendingQuery] = useState<string | null>(null)
 
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
@@ -185,244 +196,332 @@ export default function AgentPage() {
 
   useEffect(() => {
     if (session) fetchConversations()
-  }, [session])
+  }, [session]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isLoading])
+  }, [messages, generating])
 
   const fetchConversations = useCallback(async () => {
-    const res  = await fetch('/api/agent/conversations')
-    const data = await res.json()
-    setConversations(data.conversations ?? [])
+    setLoading(true)
+    try {
+      const res = await fetch('/api/agent/conversations')
+      const data = await res.json()
+      setConversations(data.conversations ?? [])
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   async function loadConversation(id: string) {
     setCurrentConvId(id)
-    setSelectedThread(null)
-    const res  = await fetch(`/api/agent/conversations/${id}`)
-    const data = await res.json()
-    setMessages(data.messages ?? [])
+    setLoading(true)
+    try {
+      const res = await fetch(`/api/agent/conversations/${id}`)
+      const data = await res.json()
+      setMessages(data.messages ?? [])
+    } finally {
+      setLoading(false)
+    }
   }
 
   function startNewConversation() {
     setCurrentConvId(null)
     setMessages([])
-    setInputQuery('')
-    setSelectedThread(null)
-    inputRef.current?.focus()
+    setInput('')
+    setShowFormatSelector(false)
+    setPendingQuery(null)
+    setTimeout(() => inputRef.current?.focus(), 50)
   }
 
   async function deleteConversation(e: React.MouseEvent, id: string) {
     e.stopPropagation()
     await fetch(`/api/agent/conversations/${id}`, { method: 'DELETE' })
-    setConversations(prev => prev.filter(c => c.id !== id))
+    setConversations((prev) => prev.filter((c) => c.id !== id))
     if (currentConvId === id) startNewConversation()
   }
 
-  async function handleSend() {
-    if (!inputQuery.trim() || isLoading) return
-    const query = inputQuery.trim()
-    setInputQuery('')
-    setIsLoading(true)
+  async function sendQuery(query: string, docFormat?: DocFormat) {
+    if (!query.trim() || generating) return
+    setGenerating(true)
+    setShowFormatSelector(false)
+    setPendingQuery(null)
 
-    const tempId = 'temp-' + Date.now()
-    const tempMsg: AgentMessage = {
-      id: tempId, conversation_id: currentConvId ?? '',
-      role: 'user', content: query,
-      threads_fetched: 0, threads_analyzed: 0,
-      action_items: [], timeline: [],
-      thread_ids: [], tokens_used: 0,
+    // Optimistic user message
+    const tempUserMsg: AgentMessage = {
+      id: 'temp-user-' + Date.now(),
+      conversation_id: currentConvId ?? '',
+      role: 'user',
+      content: query,
+      kb_entries_referenced: 0,
+      project_clusters_referenced: [],
+      response_type: 'text',
+      document_filename: null,
+      document_mime_type: null,
+      tokens_used: null,
+      was_blocked: false,
+      block_reason: null,
       created_at: new Date().toISOString(),
     }
-    setMessages(prev => [...prev, tempMsg])
+    setMessages((prev) => [...prev, tempUserMsg])
 
     try {
       const res = await fetch('/api/agent/query', {
-        method:  'POST',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, conversation_id: currentConvId, filters }),
+        body: JSON.stringify({ query, conversation_id: currentConvId }),
       })
       const data = await res.json()
 
-      if (!currentConvId) {
+      if (!currentConvId && data.conversation_id) {
         setCurrentConvId(data.conversation_id)
         fetchConversations()
       }
 
-      const assistantMsg: AgentMessage = {
-        id:               data.message_id ?? 'a-' + Date.now(),
-        conversation_id:  data.conversation_id,
-        role:             'assistant',
-        content:          data.response,
-        threads_fetched:  data.threads_fetched ?? 0,
-        threads_analyzed: data.threads_fetched ?? 0,
-        action_items:     data.action_items ?? [],
-        timeline:         data.timeline ?? [],
-        thread_ids:       [],
-        tokens_used:      0,
-        created_at:       new Date().toISOString(),
-        threads:          data.threads ?? [],
+      // If response is document-type, trigger document generation
+      if ((data.responseType === 'document' || docFormat) && !data.wasBlocked) {
+        const format = docFormat ?? 'xlsx'
+        try {
+          const docRes = await fetch('/api/documents/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query,
+              answer: data.answer,
+              format,
+              conversation_id: data.conversation_id,
+            }),
+          })
+          if (docRes.ok) {
+            const docData = await docRes.json()
+            const assistantMsg: AgentMessage = {
+              id: data.message_id ?? 'a-' + Date.now(),
+              conversation_id: data.conversation_id,
+              role: 'assistant',
+              content: data.answer,
+              kb_entries_referenced: data.kbEntriesUsed ?? 0,
+              project_clusters_referenced: data.projectClusters ?? [],
+              response_type: 'document',
+              document_filename: docData.filename ?? null,
+              document_mime_type: docData.mime_type ?? null,
+              tokens_used: data.tokensUsed ?? null,
+              was_blocked: data.wasBlocked ?? false,
+              block_reason: data.blockReason ?? null,
+              created_at: new Date().toISOString(),
+            }
+            setMessages((prev) => [...prev, assistantMsg])
+            setGenerating(false)
+            return
+          }
+        } catch {
+          // Fall through to normal message
+        }
       }
-      setMessages(prev => [...prev, assistantMsg])
+
+      const assistantMsg: AgentMessage = {
+        id: data.message_id ?? 'a-' + Date.now(),
+        conversation_id: data.conversation_id ?? currentConvId ?? '',
+        role: 'assistant',
+        content: data.answer ?? data.blockReason ?? 'No response received.',
+        kb_entries_referenced: data.kbEntriesUsed ?? 0,
+        project_clusters_referenced: data.projectClusters ?? [],
+        response_type: data.responseType ?? 'text',
+        document_filename: data.documentFilename ?? null,
+        document_mime_type: null,
+        tokens_used: data.tokensUsed ?? null,
+        was_blocked: data.wasBlocked ?? false,
+        block_reason: data.blockReason ?? null,
+        created_at: new Date().toISOString(),
+      }
+      setMessages((prev) => [...prev, assistantMsg])
     } catch {
-      // keep the user message, show error as assistant reply
-      setMessages(prev => [...prev, {
-        id:               'err-' + Date.now(),
-        conversation_id:  currentConvId ?? '',
-        role:             'assistant' as const,
-        content:          'Something went wrong. Please try again.',
-        threads_fetched:  0, threads_analyzed: 0,
-        action_items:     [], timeline: [],
-        thread_ids:       [], tokens_used: 0,
-        created_at:       new Date().toISOString(),
-      }])
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: 'err-' + Date.now(),
+          conversation_id: currentConvId ?? '',
+          role: 'assistant' as const,
+          content: 'Something went wrong. Please try again.',
+          kb_entries_referenced: 0,
+          project_clusters_referenced: [],
+          response_type: 'text' as const,
+          document_filename: null,
+          document_mime_type: null,
+          tokens_used: null,
+          was_blocked: false,
+          block_reason: null,
+          created_at: new Date().toISOString(),
+        },
+      ])
     }
-    setIsLoading(false)
+    setGenerating(false)
+  }
+
+  function handleSend() {
+    const query = input.trim()
+    if (!query || generating) return
+    setInput('')
+
+    if (hasDocumentKeyword(query)) {
+      setPendingQuery(query)
+      setShowFormatSelector(true)
+      return
+    }
+
+    sendQuery(query)
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && e.ctrlKey) {
+      e.preventDefault()
+      handleSend()
+    }
   }
 
   if (status === 'loading' || !session) {
     return (
-      <div className="flex items-center justify-center h-screen bg-slate-50 dark:bg-slate-950">
+      <div className="flex items-center justify-center h-screen">
         <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
       </div>
     )
   }
 
-  const EXAMPLES = [
-    'What is the current status of the Infosys project?',
-    'Any pending deliverables from the client this week?',
-    'What did the client say about the API integration?',
-    'Show all communication with team@company.com',
-  ]
-
   return (
     <>
-      <Header title="Agent" subtitle="Project Intelligence" />
+      <Header title="Agent" subtitle="Knowledge base chatbot" />
       <div className="flex" style={{ height: 'calc(100vh - 4rem)' }}>
 
-        {/* ── Left: Conversations ─────────────── */}
-        <aside className="w-64 border-r flex flex-col border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 shrink-0">
+        {/* ── Left sidebar: conversation history ──────────────────────────── */}
+        <aside className="w-64 border-r border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 flex flex-col shrink-0">
           <div className="p-3 border-b border-slate-200 dark:border-slate-700">
-            <button
+            <Button
               onClick={startNewConversation}
-              className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+              className="w-full gap-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-xl"
             >
               <Plus className="w-4 h-4" />
-              New Query
-            </button>
+              New Conversation
+            </Button>
           </div>
 
           <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-            {conversations.map(conv => (
+            {loading && conversations.length === 0 && (
+              <div className="flex justify-center py-8">
+                <RefreshCw className="w-4 h-4 text-slate-400 animate-spin" />
+              </div>
+            )}
+            {!loading && conversations.length === 0 && (
+              <p className="text-xs text-slate-400 text-center py-8 px-4 leading-relaxed">
+                No conversations yet.
+                <br />
+                Start by asking a question.
+              </p>
+            )}
+            {conversations.map((conv) => (
               <div
                 key={conv.id}
                 onClick={() => loadConversation(conv.id)}
                 className={cn(
-                  'group w-full text-left px-3 py-2.5',
-                  'rounded-xl cursor-pointer transition-colors',
-                  'flex items-start justify-between gap-2',
+                  'group flex items-start justify-between gap-2 px-3 py-2.5 rounded-xl cursor-pointer transition-colors',
                   currentConvId === conv.id
                     ? 'bg-blue-50 dark:bg-blue-900/20'
-                    : 'hover:bg-slate-100 dark:hover:bg-slate-800'
+                    : 'hover:bg-slate-100 dark:hover:bg-slate-800',
                 )}
               >
                 <div className="flex-1 min-w-0">
-                  <p className={cn(
-                    'text-sm truncate font-medium leading-tight',
-                    currentConvId === conv.id
-                      ? 'text-blue-700 dark:text-blue-300'
-                      : 'text-slate-700 dark:text-slate-300'
-                  )}>
-                    {conv.title}
+                  <p
+                    className={cn(
+                      'text-sm font-medium truncate leading-tight',
+                      currentConvId === conv.id
+                        ? 'text-blue-700 dark:text-blue-300'
+                        : 'text-slate-700 dark:text-slate-300',
+                    )}
+                  >
+                    {conv.title ?? 'Untitled conversation'}
                   </p>
-                  <p className="text-[11px] text-slate-400 mt-0.5">
+                  <p className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1">
+                    <Clock className="w-2.5 h-2.5" />
                     {formatDistanceToNow(new Date(conv.updated_at), { addSuffix: true })}
                   </p>
                 </div>
                 <button
-                  onClick={e => deleteConversation(e, conv.id)}
+                  onClick={(e) => deleteConversation(e, conv.id)}
                   className="opacity-0 group-hover:opacity-100 p-1 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all shrink-0"
+                  aria-label="Delete conversation"
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
             ))}
-            {conversations.length === 0 && (
-              <p className="text-xs text-slate-400 text-center py-8 px-4 leading-relaxed">
-                No queries yet.<br />
-                Start by asking about a project.
-              </p>
-            )}
           </div>
         </aside>
 
-        {/* ── Center: Chat ────────────────────── */}
+        {/* ── Right: chat area ─────────────────────────────────────────────── */}
         <main className="flex-1 flex flex-col min-w-0">
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
 
-            {messages.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full text-center max-w-lg mx-auto">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mb-6 shadow-lg shadow-blue-500/30">
+            {/* Empty state */}
+            {messages.length === 0 && !generating && (
+              <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mb-5 shadow-lg shadow-blue-500/30">
                   <Sparkles className="w-8 h-8 text-white" />
                 </div>
                 <h2 className="text-xl font-semibold text-slate-800 dark:text-slate-200 mb-2">
-                  Project Intelligence Agent
+                  Project Knowledge Base
                 </h2>
-                <p className="text-sm text-slate-500 dark:text-slate-400 mb-8 leading-relaxed">
-                  Ask me about any project, client, or topic.
-                  I&apos;ll search across your team&apos;s emails and give you a complete status update.
+                <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Ask anything about your team&apos;s project activity, email threads, tasks, and client
+                  communications.
                 </p>
-                <div className="grid gap-2 w-full">
-                  {EXAMPLES.map(ex => (
-                    <button
-                      key={ex}
-                      onClick={() => setInputQuery(ex)}
-                      className="text-left px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 text-sm text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 hover:border-blue-300 dark:hover:border-blue-700 transition-colors"
-                    >
-                      {ex}
-                    </button>
-                  ))}
-                </div>
               </div>
             )}
 
-            {messages.map(msg => (
-              <div key={msg.id} className={cn(
-                'flex gap-3',
-                msg.role === 'user' ? 'justify-end' : 'justify-start'
-              )}>
+            {/* Messages list */}
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={cn('flex gap-3', msg.role === 'user' ? 'justify-end' : 'justify-start')}
+              >
                 {msg.role === 'assistant' && (
-                  <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mt-1">
-                    <Sparkles className="w-4 h-4 text-white" />
+                  <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mt-0.5">
+                    <Bot className="w-4 h-4 text-white" />
                   </div>
                 )}
-                <div className={cn(
-                  'rounded-2xl',
-                  msg.role === 'user'
-                    ? 'max-w-[70%] bg-blue-600 text-white px-4 py-3'
-                    : 'flex-1 max-w-[85%] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-5 py-4 space-y-4'
-                )}>
+
+                <div
+                  className={cn(
+                    'rounded-2xl',
+                    msg.role === 'user'
+                      ? 'max-w-[70%] bg-blue-600 text-white px-4 py-3'
+                      : 'flex-1 max-w-[85%] bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 px-5 py-4',
+                  )}
+                >
                   {msg.role === 'user' ? (
                     <p className="text-sm leading-relaxed">{msg.content}</p>
                   ) : (
-                    <AssistantMessage message={msg} onThreadClick={setSelectedThread} />
+                    <AssistantBubble message={msg} />
                   )}
                 </div>
+
+                {msg.role === 'user' && (
+                  <div className="w-8 h-8 rounded-full shrink-0 bg-slate-200 dark:bg-slate-700 flex items-center justify-center mt-0.5">
+                    <User className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+                  </div>
+                )}
               </div>
             ))}
 
-            {isLoading && (
+            {/* Generating indicator */}
+            {generating && (
               <div className="flex gap-3 justify-start">
                 <div className="w-8 h-8 rounded-full shrink-0 bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
-                  <Sparkles className="w-4 h-4 text-white" />
+                  <Bot className="w-4 h-4 text-white" />
                 </div>
                 <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl px-5 py-4">
                   <div className="flex items-center gap-3">
                     <div className="flex gap-1">
-                      {[0, 1, 2].map(i => (
+                      {[0, 1, 2].map((i) => (
                         <div
                           key={i}
                           className="w-2 h-2 rounded-full bg-blue-500 animate-bounce"
@@ -430,9 +529,7 @@ export default function AgentPage() {
                         />
                       ))}
                     </div>
-                    <span className="text-xs text-slate-400">
-                      Searching emails and analyzing...
-                    </span>
+                    <span className="text-xs text-slate-400">Searching knowledge base…</span>
                   </div>
                 </div>
               </div>
@@ -441,131 +538,62 @@ export default function AgentPage() {
             <div ref={bottomRef} />
           </div>
 
-          {/* Input */}
-          <div className="border-t border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-white dark:bg-slate-900/50">
-
-            {showFilters && (
-              <div className="flex gap-2 flex-wrap p-3 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-200 dark:border-slate-700">
-                <input
-                  type="text"
-                  placeholder="From email..."
-                  value={filters.from}
-                  onChange={e => setFilters(f => ({ ...f, from: e.target.value }))}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-500/50"
-                />
-                <input
-                  type="date"
-                  value={filters.dateFrom}
-                  onChange={e => setFilters(f => ({ ...f, dateFrom: e.target.value }))}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
-                />
-                <input
-                  type="date"
-                  value={filters.dateTo}
-                  onChange={e => setFilters(f => ({ ...f, dateTo: e.target.value }))}
-                  className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
-                />
+          {/* Input area */}
+          <div className="border-t border-slate-200 dark:border-slate-700 px-4 py-3 space-y-2 bg-white dark:bg-slate-900/50">
+            {/* Quick prompts */}
+            <div className="flex gap-2 flex-wrap">
+              {QUICK_PROMPTS.map((prompt) => (
                 <button
-                  onClick={() => setFilters({ from: '', dateFrom: '', dateTo: '' })}
-                  className="text-xs text-slate-400 hover:text-slate-600 px-2"
+                  key={prompt}
+                  onClick={() => setInput(prompt)}
+                  className="text-[11px] px-3 py-1 rounded-full border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-300 dark:hover:border-blue-600 transition-colors"
                 >
-                  Clear
+                  {prompt}
                 </button>
-              </div>
-            )}
-
-            <div className="flex gap-3 items-end">
-              <button
-                onClick={() => setShowFilters(v => !v)}
-                title="Toggle filters"
-                className={cn(
-                  'p-2.5 rounded-xl border shrink-0 transition-colors',
-                  showFilters
-                    ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-                    : 'border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
-                )}
-              >
-                <Filter className="w-4 h-4" />
-              </button>
-
-              <div className="flex-1 relative">
-                <textarea
-                  ref={inputRef}
-                  value={inputQuery}
-                  onChange={e => setInputQuery(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      handleSend()
-                    }
-                  }}
-                  placeholder="Ask about a project, client, or topic..."
-                  rows={1}
-                  className="w-full resize-none px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-800 dark:text-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 dark:focus:border-blue-600 transition-all"
-                  style={{ minHeight: '48px', maxHeight: '120px' }}
-                />
-              </div>
-
-              <button
-                onClick={handleSend}
-                disabled={!inputQuery.trim() || isLoading}
-                className="p-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white transition-colors shrink-0"
-              >
-                <Send className="w-4 h-4" />
-              </button>
+              ))}
             </div>
 
+            {/* Format selector (shown when doc keywords detected) */}
+            {showFormatSelector && pendingQuery && (
+              <FormatSelector
+                onSelect={(fmt) => sendQuery(pendingQuery, fmt)}
+                onCancel={() => {
+                  setShowFormatSelector(false)
+                  setPendingQuery(null)
+                }}
+              />
+            )}
+
+            {/* Textarea + send */}
+            <div className="flex items-end gap-3">
+              <Textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask anything about your team's project activity… (Ctrl+Enter to send)"
+                rows={2}
+                className="flex-1 resize-none rounded-xl border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-800 dark:text-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 dark:focus:border-blue-600 transition-all"
+                style={{ minHeight: '52px', maxHeight: '140px' }}
+              />
+              <Button
+                onClick={handleSend}
+                disabled={!input.trim() || generating}
+                className="shrink-0 h-10 w-10 p-0 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white transition-colors"
+                aria-label="Ask"
+              >
+                {generating ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+              </Button>
+            </div>
             <p className="text-[11px] text-slate-400 text-center">
-              Searches across your team&apos;s inboxes · Enter to send · Shift+Enter for new line
+              Ctrl+Enter to send · Enter for new line · Type &quot;report&quot; or &quot;excel&quot; to export data
             </p>
           </div>
         </main>
-
-        {/* ── Right: Thread detail ─────────────── */}
-        {selectedThread && (
-          <aside className="w-80 border-l shrink-0 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex flex-col">
-            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-              <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                Email Thread
-              </p>
-              <button
-                onClick={() => setSelectedThread(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200 leading-snug">
-                {selectedThread.subject || '(No subject)'}
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {selectedThread.from}
-              </p>
-              <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                <Clock className="w-3 h-3" />
-                {selectedThread.date}
-                <span className="ml-1">· {selectedThread.messageCount} messages</span>
-              </div>
-              <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed whitespace-pre-wrap">
-                  {selectedThread.snippet}
-                </p>
-              </div>
-            </div>
-            <div className="p-4 border-t border-slate-200 dark:border-slate-700">
-              <a
-                href={selectedThread.gmailLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-xl transition-colors"
-              >
-                <ExternalLink className="w-4 h-4" />
-                Open in Gmail
-              </a>
-            </div>
-          </aside>
-        )}
       </div>
     </>
   )

@@ -4,421 +4,592 @@ import { useEffect, useState, useCallback } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import { Header } from '@/components/layout/Header'
-import { DailyDigest } from '@/components/dashboard/DailyDigest'
-import { TaskTable } from '@/components/dashboard/TaskTable'
+import { PersonalEmailCard } from '@/components/dashboard/PersonalEmailCard'
+import { DailyTodos } from '@/components/dashboard/DailyTodos'
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Card, CardContent } from '@/components/ui/card'
 import { createClient } from '@/lib/supabase/client'
-import type { Task, TaskStatus, ThreadWithMember } from '@/lib/supabase/types'
-import { Copy, RefreshCw, Search, Sparkles, CheckCircle, Clock, BarChart2, AlertCircle, Hourglass } from 'lucide-react'
-import { GmailSearchPanel } from '@/components/dashboard/GmailSearchPanel'
-import { TaskDetailPanel } from '@/components/dashboard/TaskDetailPanel'
-import { ReplyComposer } from '@/components/dashboard/ReplyComposer'
 import { cn } from '@/lib/utils'
+import type {
+  PersonalInboxEmail,
+  DailyTodo,
+  PersonalEmailStats,
+  TodoPriority,
+} from '@/lib/supabase/types'
+import {
+  Mail,
+  MailOpen,
+  Zap,
+  CheckSquare,
+  Search,
+  RefreshCw,
+  Send,
+  Loader2,
+} from 'lucide-react'
 
-interface MyStats {
-  avg_response_minutes: number | null
-  on_time_pct: number | null
-  pending_count: number
-  awaiting_reply_count: number
+// ── Stat card ─────────────────────────────────────────────────────────────────
+
+interface StatCardProps {
+  label:   string
+  value:   number | string
+  icon:    React.ComponentType<{ className?: string }>
+  accent:  string
+  loading: boolean
 }
 
-interface ThisWeek {
-  appReplies: number
-  gmailReplies: number
-  avgThisWeek: number | null
+function StatCard({ label, value, icon: Icon, accent, loading }: StatCardProps) {
+  return (
+    <Card className={cn(
+      'rounded-2xl border border-t-[3px] shadow-sm bg-white dark:bg-slate-900',
+      'border-slate-200 dark:border-slate-800',
+      accent,
+    )}>
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+            {label}
+          </p>
+          <div className="w-8 h-8 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center">
+            <Icon className="w-4 h-4 text-slate-400 dark:text-slate-500" />
+          </div>
+        </div>
+        {loading ? (
+          <div className="h-9 w-12 skeleton rounded" />
+        ) : (
+          <p className="text-3xl font-bold text-slate-900 dark:text-white">{value}</p>
+        )}
+      </CardContent>
+    </Card>
+  )
 }
 
-function formatDuration(minutes: number): string {
-  if (minutes < 60) return `${minutes}m`
-  const h = Math.floor(minutes / 60)
-  const m = minutes % 60
-  return m > 0 ? `${h}h ${m}m` : `${h}h`
+// ── Reply modal ───────────────────────────────────────────────────────────────
+
+interface ReplyModalProps {
+  email:   PersonalInboxEmail | null
+  onClose: () => void
+  onSent:  () => void
 }
 
-function MyResponseStats() {
-  const [stats,    setStats]    = useState<MyStats | null>(null)
-  const [thisWeek, setThisWeek] = useState<ThisWeek | null>(null)
+function ReplyModal({ email, onClose, onSent }: ReplyModalProps) {
+  const [body,    setBody]    = useState('')
+  const [sending, setSending] = useState(false)
+  const [error,   setError]   = useState<string | null>(null)
 
   useEffect(() => {
-    fetch('/api/me/stats')
-      .then(r => r.ok ? r.json() : null)
-      .then(d => {
-        if (d) {
-          setStats(d.stats)
-          setThisWeek(d.thisWeek)
-        }
+    if (!email) {
+      setBody('')
+      setError(null)
+    }
+  }, [email])
+
+  async function handleSend() {
+    if (!email || !body.trim() || sending) return
+    setSending(true)
+    setError(null)
+
+    try {
+      const res = await fetch('/api/gmail/reply', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          thread_id:  email.gmail_thread_id,
+          message_id: email.gmail_message_id,
+          to:         email.from_email,
+          subject:    email.subject ? `Re: ${email.subject}` : 'Re: (No subject)',
+          body:       body.trim(),
+        }),
       })
-      .catch(() => {})
-  }, [])
 
-  const chips = [
-    {
-      label:  'Avg Response',
-      value:  stats?.avg_response_minutes != null ? formatDuration(stats.avg_response_minutes) : '—',
-      icon:   Clock,
-      color:  stats?.avg_response_minutes == null ? 'text-slate-400'
-              : stats.avg_response_minutes < 120   ? 'text-emerald-600 dark:text-emerald-400'
-              : stats.avg_response_minutes < 480   ? 'text-yellow-600 dark:text-yellow-500'
-              : 'text-red-600 dark:text-red-400',
-    },
-    {
-      label:  'On Time Rate',
-      value:  stats?.on_time_pct != null ? `${Math.round(stats.on_time_pct)}%` : '—',
-      icon:   BarChart2,
-      color:  stats?.on_time_pct == null ? 'text-slate-400'
-              : stats.on_time_pct >= 80  ? 'text-emerald-600 dark:text-emerald-400'
-              : stats.on_time_pct >= 50  ? 'text-yellow-600 dark:text-yellow-500'
-              : 'text-red-600 dark:text-red-400',
-    },
-    {
-      label:  'Pending',
-      value:  stats?.pending_count ?? '—',
-      icon:   AlertCircle,
-      color:  (stats?.pending_count ?? 0) > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-600 dark:text-slate-300',
-    },
-    {
-      label:  'Awaiting Reply',
-      value:  stats?.awaiting_reply_count ?? '—',
-      icon:   Hourglass,
-      color:  (stats?.awaiting_reply_count ?? 0) > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-300',
-    },
-  ]
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error((data as { error?: string }).error ?? `Error ${res.status}`)
+      }
+
+      onSent()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send reply')
+      setSending(false)
+    }
+  }
 
   return (
-    <div className="mb-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 border-t-[3px] border-t-blue-500 p-5 shadow-sm animate-slide-up">
-      <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-4">
-        My Response Stats
-      </p>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-        {chips.map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center shrink-0">
-              <Icon className="w-4 h-4 text-slate-400 dark:text-slate-500" />
+    <Dialog open={!!email} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-w-lg dark:bg-slate-900 dark:border-slate-800">
+        <DialogHeader>
+          <DialogTitle className="text-base font-bold flex items-center gap-2 dark:text-white">
+            <div className="w-8 h-8 rounded-xl bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
+              <Send className="w-4 h-4 text-blue-500" />
             </div>
-            <div>
-              <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-none mb-0.5">{label}</p>
-              <p className={cn('text-base font-bold leading-none', color)}>{value}</p>
+            Reply
+          </DialogTitle>
+          {email && (
+            <div className="mt-2 space-y-0.5">
+              <p className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate">
+                {email.subject ?? '(No subject)'}
+              </p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                To: {email.from_name ? `${email.from_name} <${email.from_email}>` : email.from_email}
+              </p>
             </div>
-          </div>
-        ))}
-      </div>
-      {thisWeek && (
-        <p className="text-[11px] text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800 pt-3 mt-1">
-          This week: <span className="text-slate-600 dark:text-slate-300 font-medium">{thisWeek.appReplies} via app</span>
-          {' · '}
-          <span className="text-slate-600 dark:text-slate-300 font-medium">{thisWeek.gmailReplies} via Gmail</span>
-          {thisWeek.avgThisWeek != null && (
-            <> · avg {formatDuration(thisWeek.avgThisWeek)}</>
           )}
-        </p>
-      )}
-    </div>
-  )
-}
+        </DialogHeader>
 
-function DigestSkeleton() {
-  return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-      {Array.from({ length: 4 }).map((_, i) => (
-        <div
-          key={i}
-          className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 border-t-[3px] border-t-slate-200 dark:border-t-slate-700 p-5 shadow-sm animate-fade-in"
-          style={{ animationDelay: `${i * 70}ms` }}
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div className="h-2.5 skeleton rounded w-16" />
-            <div className="w-8 h-8 skeleton rounded-xl" />
+        <div className="space-y-3 mt-1">
+          <Textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Write your reply…"
+            rows={7}
+            className="resize-none text-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200 dark:placeholder:text-slate-500"
+          />
+
+          {error && (
+            <p className="text-xs text-red-500 dark:text-red-400">{error}</p>
+          )}
+
+          <div className="flex gap-2">
+            <Button
+              onClick={handleSend}
+              disabled={!body.trim() || sending}
+              className="flex-1 h-10 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+            >
+              {sending ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Sending…
+                </>
+              ) : (
+                <>
+                  <Send className="w-4 h-4 mr-2" />
+                  Send Reply
+                </>
+              )}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={onClose}
+              className="h-10 px-5 text-sm dark:border-slate-700 dark:text-slate-300"
+            >
+              Cancel
+            </Button>
           </div>
-          <div className="h-9 skeleton rounded w-12" />
         </div>
-      ))}
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
-export default function DashboardPage() {
+// ── Main dashboard page ───────────────────────────────────────────────────────
+
+export default function PersonalDashboardPage() {
   const { data: session, status } = useSession()
   const router = useRouter()
 
-  const [tasks, setTasks] = useState<Task[]>([])
-  const [loading, setLoading] = useState(true)
-  const [statusFilter, setStatusFilter] = useState<string>('all')
-  const [priorityFilter, setPriorityFilter] = useState<string>('all')
-  const [followUpTask, setFollowUpTask] = useState<Task | null>(null)
-  const [followUpDraft, setFollowUpDraft] = useState<{ subject: string; body: string } | null>(null)
-  const [generatingDraft, setGeneratingDraft] = useState(false)
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null)
-  const [replyThread, setReplyThread] = useState<ThreadWithMember | null>(null)
+  // Emails
+  const [emails,       setEmails]       = useState<PersonalInboxEmail[]>([])
+  const [emailStats,   setEmailStats]   = useState<PersonalEmailStats | null>(null)
+  const [emailLoading, setEmailLoading] = useState(true)
 
+  // Todos
+  const [todos,       setTodos]       = useState<DailyTodo[]>([])
+  const [todosLoading, setTodosLoading] = useState(true)
+
+  // Filters
+  const [showUnreadOnly, setShowUnreadOnly] = useState(false)
+  const [priorityFilter, setPriorityFilter] = useState<string>('all')
+  const [searchQuery,    setSearchQuery]    = useState('')
+
+  // Reply modal
+  const [replyEmail, setReplyEmail] = useState<PersonalInboxEmail | null>(null)
+
+  // ── Auth guard ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (status === 'unauthenticated') router.push('/login')
   }, [status, router])
 
-  const fetchTasks = useCallback(async () => {
-    const params = new URLSearchParams()
-    if (statusFilter !== 'all') params.set('status', statusFilter)
-    if (priorityFilter !== 'all') params.set('priority', priorityFilter)
+  // ── Fetch helpers ───────────────────────────────────────────────────────────
+  const fetchEmails = useCallback(async () => {
+    setEmailLoading(true)
+    try {
+      const params = new URLSearchParams({ limit: '40' })
+      if (showUnreadOnly)           params.set('unread', 'true')
+      if (priorityFilter !== 'all') params.set('priority', priorityFilter)
 
-    const res = await fetch(`/api/tasks?${params.toString()}`)
-    if (res.ok) {
-      const data = await res.json()
-      setTasks(data.tasks ?? [])
+      const res  = await fetch(`/api/personal/inbox?${params.toString()}`)
+      if (res.ok) {
+        const data = await res.json()
+        setEmails(data.emails ?? [])
+        setEmailStats(data.stats ?? null)
+      }
+    } finally {
+      setEmailLoading(false)
     }
-    setLoading(false)
-  }, [statusFilter, priorityFilter])
+  }, [showUnreadOnly, priorityFilter])
 
+  const fetchTodos = useCallback(async () => {
+    setTodosLoading(true)
+    try {
+      const res = await fetch('/api/personal/todos?date=today')
+      if (res.ok) {
+        const data = await res.json()
+        setTodos(data.todos ?? [])
+      }
+    } finally {
+      setTodosLoading(false)
+    }
+  }, [])
+
+  // ── Initial load ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (session) fetchTasks()
-  }, [session, fetchTasks])
+    if (session) {
+      fetchEmails()
+      fetchTodos()
+    }
+  }, [session, fetchEmails, fetchTodos])
 
+  // ── Supabase Realtime — personal inbox ──────────────────────────────────────
   useEffect(() => {
     if (!session?.user?.email) return
+
     const supabase = createClient()
-    const channel = supabase
-      .channel('tasks-realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'tasks' }, (payload) => {
-        setTasks(prev => [payload.new as Task, ...prev])
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tasks' }, (payload) => {
-        setTasks(prev => prev.map(t =>
-          t.id === payload.new.id ? { ...t, ...payload.new as Task } : t
-        ))
-      })
+    const channel  = supabase
+      .channel('personal-inbox-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'personal_inbox_emails' },
+        (payload) => {
+          setEmails((prev) => [payload.new as PersonalInboxEmail, ...prev])
+          setEmailStats((prev) => prev
+            ? { ...prev, total: prev.total + 1, unread: prev.unread + (payload.new.is_read ? 0 : 1) }
+            : prev
+          )
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'personal_inbox_emails' },
+        (payload) => {
+          setEmails((prev) =>
+            prev.map((e) =>
+              e.id === payload.new.id ? { ...e, ...(payload.new as PersonalInboxEmail) } : e,
+            ),
+          )
+        },
+      )
       .subscribe()
+
     return () => { supabase.removeChannel(channel) }
-  }, [session, fetchTasks])
+  }, [session])
 
-  const handleStatusChange = async (taskId: string, newStatus: TaskStatus) => {
-    await fetch(`/api/tasks/${taskId}`, {
-      method: 'PATCH',
+  // ── Email actions ───────────────────────────────────────────────────────────
+  const handleMarkRead = useCallback(async (id: string) => {
+    const res = await fetch(`/api/personal/inbox/${id}`, {
+      method:  'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus }),
+      body:    JSON.stringify({ is_read: true }),
     })
-    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)))
-  }
-
-  const handleFollowUp = async (task: Task) => {
-    setFollowUpTask(task)
-    setFollowUpDraft(null)
-    setGeneratingDraft(true)
-    setCopied(false)
-
-    const res = await fetch('/api/ai/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'followup',
-        subject: task.email_threads?.subject ?? '',
-        threadContent: task.email_threads?.summary ?? task.task,
-        taskDescription: task.task,
-      }),
-    })
-
     if (res.ok) {
-      const data = await res.json()
-      setFollowUpDraft(data.draft)
+      setEmails((prev) =>
+        prev.map((e) => (e.id === id ? { ...e, is_read: true } : e)),
+      )
+      setEmailStats((prev) => prev && prev.unread > 0
+        ? { ...prev, unread: prev.unread - 1 }
+        : prev
+      )
     }
-    setGeneratingDraft(false)
-  }
+  }, [])
 
-  const handleCopy = () => {
-    if (!followUpDraft) return
-    navigator.clipboard.writeText(`Subject: ${followUpDraft.subject}\n\n${followUpDraft.body}`)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2200)
-  }
+  const handleDismiss = useCallback(async (id: string) => {
+    await fetch(`/api/personal/inbox/${id}`, {
+      method:  'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ dismissed: true }),
+    })
+    setEmails((prev) => prev.filter((e) => e.id !== id))
+    setEmailStats((prev) => prev && prev.total > 0
+      ? { ...prev, total: prev.total - 1 }
+      : prev
+    )
+  }, [])
 
-  if (status === 'loading' || !session) return (
-    <div className="p-6 animate-fade-in">
-      <div className="h-16 mb-6 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 -mx-6 -mt-6 px-6 flex items-center">
-        <div className="h-5 skeleton rounded w-32" />
+  // ── Todo actions ────────────────────────────────────────────────────────────
+  const handleTodoUpdate = useCallback(async (
+    id: string,
+    patch: Partial<Pick<DailyTodo, 'status' | 'title' | 'priority'>>,
+  ) => {
+    const res = await fetch(`/api/personal/todos/${id}`, {
+      method:  'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(patch),
+    })
+    if (res.ok) {
+      setTodos((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+      )
+    }
+  }, [])
+
+  const handleTodoDelete = useCallback(async (id: string) => {
+    await fetch(`/api/personal/todos/${id}`, { method: 'DELETE' })
+    setTodos((prev) => prev.filter((t) => t.id !== id))
+  }, [])
+
+  const handleTodoAdd = useCallback(async (data: {
+    title:           string
+    priority:        TodoPriority
+    linked_email_id?: string
+  }) => {
+    const res = await fetch('/api/personal/todos', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(data),
+    })
+    if (res.ok) {
+      const json = await res.json()
+      setTodos((prev) => [json.todo, ...prev])
+    }
+  }, [])
+
+  // ── Filtered emails for display ─────────────────────────────────────────────
+  const visibleEmails = emails.filter((e) => {
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase()
+      const haystack = [
+        e.subject ?? '',
+        e.from_name ?? '',
+        e.from_email ?? '',
+        e.snippet ?? '',
+      ].join(' ').toLowerCase()
+      if (!haystack.includes(q)) return false
+    }
+    return true
+  })
+
+  // ── Todos due today ─────────────────────────────────────────────────────────
+  const todosDueToday = todos.filter(
+    (t) => t.status !== 'completed' && t.status !== 'deferred',
+  ).length
+
+  // ── Loading skeleton ────────────────────────────────────────────────────────
+  if (status === 'loading' || !session) {
+    return (
+      <div className="p-6 animate-fade-in">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-28 skeleton rounded-2xl" style={{ animationDelay: `${i * 60}ms` }} />
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="space-y-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="h-24 skeleton rounded-xl" style={{ animationDelay: `${i * 40}ms` }} />
+            ))}
+          </div>
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="h-14 skeleton rounded-xl" style={{ animationDelay: `${i * 40}ms` }} />
+            ))}
+          </div>
+        </div>
       </div>
-      <DigestSkeleton />
-      <div className="h-12 skeleton rounded-2xl mb-5" />
-      {Array.from({ length: 5 }).map((_, i) => (
-        <div key={i} className="h-14 skeleton rounded-xl mb-2" style={{ animationDelay: `${i * 40}ms` }} />
-      ))}
-    </div>
-  )
+    )
+  }
 
   const greeting = session.user?.name?.split(' ')[0] ?? 'there'
 
   return (
     <>
-      <Header
-        title="Dashboard"
-        subtitle={`Welcome back, ${greeting}`}
-      />
-      <div className="p-6">
-        {loading ? <DigestSkeleton /> : <DailyDigest tasks={tasks} />}
+      <Header title="Dashboard" subtitle={`Welcome back, ${greeting}`} />
 
-        <MyResponseStats />
+      <div className="p-6 space-y-6">
 
-        {/* Filter bar */}
-        <div className="flex flex-wrap items-center gap-2.5 mb-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl px-4 py-3 shadow-sm animate-slide-up">
-          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v ?? 'all')}>
-            <SelectTrigger className="w-38 h-8 text-sm border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-white dark:hover:bg-slate-700 rounded-lg transition-colors dark:text-slate-300">
-              <SelectValue placeholder="All status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All status</SelectItem>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="in_progress">In Progress</SelectItem>
-              <SelectItem value="completed">Completed</SelectItem>
-              <SelectItem value="ignored">Ignored</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <Select value={priorityFilter} onValueChange={(v) => setPriorityFilter(v ?? 'all')}>
-            <SelectTrigger className="w-38 h-8 text-sm border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-white dark:hover:bg-slate-700 rounded-lg transition-colors dark:text-slate-300">
-              <SelectValue placeholder="All priority" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All priority</SelectItem>
-              <SelectItem value="high">High</SelectItem>
-              <SelectItem value="medium">Medium</SelectItem>
-              <SelectItem value="low">Low</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <div className="flex items-center gap-2 ml-auto">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 px-3 rounded-lg text-sm"
-              onClick={fetchTasks}
-            >
-              <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
-              Refresh
-            </Button>
-
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-blue-50 dark:hover:bg-blue-500/10 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-200 dark:hover:border-blue-500/40 transition-all duration-200 px-3 rounded-lg text-sm"
-              onClick={() => setSearchOpen(true)}
-            >
-              <Search className="w-3.5 h-3.5 mr-1.5" />
-              Search Inbox
-            </Button>
-
-            <span className="text-xs text-slate-400 dark:text-slate-500 pl-2.5 border-l border-slate-200 dark:border-slate-700">
-              {loading ? '—' : `${tasks.length} task${tasks.length !== 1 ? 's' : ''}`}
-            </span>
-          </div>
+        {/* ── Stats bar ─────────────────────────────────────────────────────── */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <StatCard
+            label="Total Emails"
+            value={emailStats?.total ?? 0}
+            icon={Mail}
+            accent="border-t-slate-400"
+            loading={emailLoading}
+          />
+          <StatCard
+            label="Unread"
+            value={emailStats?.unread ?? 0}
+            icon={MailOpen}
+            accent="border-t-blue-500"
+            loading={emailLoading}
+          />
+          <StatCard
+            label="Actionable"
+            value={emailStats?.actionable ?? 0}
+            icon={Zap}
+            accent="border-t-yellow-500"
+            loading={emailLoading}
+          />
+          <StatCard
+            label="Todos Due Today"
+            value={todosDueToday}
+            icon={CheckSquare}
+            accent="border-t-green-500"
+            loading={todosLoading}
+          />
         </div>
 
-        <div className="overflow-x-auto">
-          <div className={cn('min-w-[600px]', loading ? 'opacity-0 pointer-events-none' : 'animate-fade-in')}>
-            <TaskTable
-              tasks={tasks}
-              onStatusChange={handleStatusChange}
-              onFollowUp={handleFollowUp}
-              onTaskClick={setSelectedTask}
-            />
+        {/* ── Two-column layout ──────────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+          {/* ── Left: Personal Inbox ──────────────────────────────────────── */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+            {/* Column header */}
+            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Personal Inbox</p>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
+                  {emailLoading ? 'Loading…' : `${visibleEmails.length} email${visibleEmails.length !== 1 ? 's' : ''}`}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2.5 text-xs text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                onClick={fetchEmails}
+                disabled={emailLoading}
+              >
+                <RefreshCw className={cn('w-3.5 h-3.5', emailLoading && 'animate-spin')} />
+              </Button>
+            </div>
+
+            {/* Filters */}
+            <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800 flex flex-wrap items-center gap-2">
+              {/* Search */}
+              <div className="relative flex-1 min-w-[120px]">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search…"
+                  className="w-full pl-8 pr-3 h-8 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500/30 focus:border-blue-400 dark:focus:border-blue-600"
+                />
+              </div>
+
+              {/* Unread toggle */}
+              <button
+                onClick={() => setShowUnreadOnly((v) => !v)}
+                className={cn(
+                  'h-8 px-3 text-xs rounded-lg border font-medium transition-colors',
+                  showUnreadOnly
+                    ? 'bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-600 dark:text-blue-400'
+                    : 'border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800',
+                )}
+              >
+                Unread
+              </button>
+
+              {/* Priority filter */}
+              <Select value={priorityFilter} onValueChange={(v) => setPriorityFilter(v ?? '')}>
+                <SelectTrigger className="w-28 h-8 text-xs bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 dark:text-slate-300">
+                  <SelectValue placeholder="Priority" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All priority</SelectItem>
+                  <SelectItem value="high">High</SelectItem>
+                  <SelectItem value="medium">Medium</SelectItem>
+                  <SelectItem value="low">Low</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Email list */}
+            <div className="divide-y divide-slate-50 dark:divide-slate-800/60 overflow-y-auto max-h-[600px]">
+              {emailLoading ? (
+                <div className="p-4 space-y-2">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <div key={i} className="h-20 skeleton rounded-xl" style={{ animationDelay: `${i * 40}ms` }} />
+                  ))}
+                </div>
+              ) : visibleEmails.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-14 text-center">
+                  <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-3">
+                    <Mail className="w-5 h-5 text-slate-400" />
+                  </div>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 font-medium">No emails found</p>
+                  <p className="text-xs text-slate-400 dark:text-slate-600 mt-1">
+                    {showUnreadOnly || priorityFilter !== 'all' || searchQuery
+                      ? 'Try adjusting your filters'
+                      : 'Your inbox is empty'}
+                  </p>
+                </div>
+              ) : (
+                <div className="p-3 space-y-2">
+                  {visibleEmails.map((email) => (
+                    <PersonalEmailCard
+                      key={email.id}
+                      email={email}
+                      onMarkRead={handleMarkRead}
+                      onReply={setReplyEmail}
+                      onDismiss={handleDismiss}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
+
+          {/* ── Right: Daily To-Do ─────────────────────────────────────────── */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+            <div className="px-4 pt-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                Today&apos;s To-Do
+              </p>
+            </div>
+
+            <div className="p-4">
+              {todosLoading ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="h-12 skeleton rounded-xl" style={{ animationDelay: `${i * 40}ms` }} />
+                  ))}
+                </div>
+              ) : (
+                <DailyTodos
+                  todos={todos}
+                  emails={emails}
+                  onUpdate={handleTodoUpdate}
+                  onDelete={handleTodoDelete}
+                  onAdd={handleTodoAdd}
+                />
+              )}
+            </div>
+          </div>
+
         </div>
       </div>
 
-      <TaskDetailPanel
-        task={selectedTask}
-        isOpen={selectedTask !== null}
-        onClose={() => setSelectedTask(null)}
-        onTaskUpdated={(updated) => {
-          setTasks(prev => prev.map(t => t.id === updated.id ? updated : t))
-          setSelectedTask(updated)
+      {/* ── Reply modal ──────────────────────────────────────────────────────── */}
+      <ReplyModal
+        email={replyEmail}
+        onClose={() => setReplyEmail(null)}
+        onSent={() => {
+          setReplyEmail(null)
+          fetchEmails()
         }}
-        onReply={(thread) => setReplyThread(thread)}
       />
-
-      {replyThread && (
-        <ReplyComposer
-          thread={replyThread}
-          isOpen={replyThread !== null}
-          onClose={() => setReplyThread(null)}
-          onReplySent={() => { setReplyThread(null); fetchTasks() }}
-        />
-      )}
-
-      <GmailSearchPanel open={searchOpen} onClose={() => setSearchOpen(false)} />
-
-      {/* Follow-up dialog */}
-      <Dialog open={!!followUpTask} onOpenChange={() => { setFollowUpTask(null); setCopied(false) }}>
-        <DialogContent className="max-w-lg dark:bg-slate-900 dark:border-slate-800">
-          <DialogHeader>
-            <div className="flex items-center gap-2.5 mb-1">
-              <div className="w-8 h-8 rounded-xl bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
-                <Sparkles className="w-4 h-4 text-blue-500" />
-              </div>
-              <DialogTitle className="text-base font-bold dark:text-white">Draft Follow-up Reply</DialogTitle>
-            </div>
-            <DialogDescription className="text-sm leading-relaxed dark:text-slate-400">
-              AI-generated reply for:{' '}
-              <span className="font-semibold text-slate-700 dark:text-slate-300">{followUpTask?.task}</span>
-            </DialogDescription>
-          </DialogHeader>
-
-          {generatingDraft ? (
-            <div className="py-12 flex flex-col items-center gap-3.5">
-              <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
-                <Sparkles className="w-6 h-6 text-blue-500 animate-pulse" />
-              </div>
-              <div className="text-center">
-                <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">Drafting your reply…</p>
-                <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">This usually takes a few seconds</p>
-              </div>
-            </div>
-          ) : followUpDraft ? (
-            <div className="space-y-3.5 animate-fade-in">
-              <div>
-                <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Subject</p>
-                <p className="text-sm text-slate-800 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 font-medium">
-                  {followUpDraft.subject}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2">Body</p>
-                <pre className="text-sm text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 whitespace-pre-wrap font-sans leading-relaxed max-h-60 overflow-y-auto">
-                  {followUpDraft.body}
-                </pre>
-              </div>
-              <Button
-                size="sm"
-                className={`w-full h-10 text-sm font-semibold rounded-xl transition-all duration-200 ${
-                  copied
-                    ? 'bg-emerald-600 hover:bg-emerald-600 text-white shadow-md shadow-emerald-500/20'
-                    : 'bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 text-white dark:text-slate-900'
-                }`}
-                onClick={handleCopy}
-              >
-                {copied ? (
-                  <>
-                    <CheckCircle className="w-3.5 h-3.5 mr-2" />
-                    Copied to clipboard!
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5 mr-2" />
-                    Copy to clipboard
-                  </>
-                )}
-              </Button>
-            </div>
-          ) : (
-            <div className="py-8 text-center text-slate-400 dark:text-slate-500 text-sm">
-              Could not generate draft. Please try again.
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </>
   )
 }

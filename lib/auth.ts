@@ -32,6 +32,7 @@ export interface AuthenticatedMember {
   name: string
   role: TeamRole
   is_active: boolean
+  consent_given: boolean
 }
 
 export async function getMemberFromSession(): Promise<AuthenticatedMember | null> {
@@ -41,10 +42,17 @@ export async function getMemberFromSession(): Promise<AuthenticatedMember | null
   const supabase = getServiceSupabase()
   const { data: member } = await supabase
     .from('team_members')
-    .select('id, email, name, role, is_active')
+    .select('id, email, name, role, is_active, consent_given')
     .eq('email', session.user.email)
     .eq('is_active', true)
     .single()
 
   return member as AuthenticatedMember | null
+}
+
+/** Returns member only if consent has been given. Use in KB/agent routes. */
+export async function getConsentedMember(): Promise<AuthenticatedMember | null> {
+  const member = await getMemberFromSession()
+  if (!member || !member.consent_given) return null
+  return member
 }

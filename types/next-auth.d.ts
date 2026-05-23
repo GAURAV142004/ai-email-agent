@@ -8,6 +8,7 @@ declare module 'next-auth' {
     user: {
       memberId: string
       role: TeamRole
+      consentGiven: boolean
     } & DefaultSession['user']
   }
 }
@@ -20,5 +21,6 @@ declare module 'next-auth/jwt' {
     role?: string
     memberName?: string
     memberId?: string
+    consentGiven?: boolean
   }
 }

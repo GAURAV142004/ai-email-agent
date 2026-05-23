@@ -6,33 +6,58 @@ export async function GET(): Promise<NextResponse> {
   if (!member) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const supabase = getServiceSupabase()
+  const now      = new Date()
+  const today    = now.toISOString().split('T')[0]
 
-  const { data: stats } = await supabase
-    .from('member_response_stats')
-    .select('*')
-    .eq('id', member.id)
+  // Personal inbox stats
+  const { data: inboxRows } = await supabase
+    .from('personal_inbox_emails')
+    .select('id, is_read, ai_priority, is_actionable, reply_sent, received_at')
+    .eq('member_id', member.id)
+    .gt('expires_at', now.toISOString())
+
+  const emails = inboxRows ?? []
+  const inboxStats = {
+    total:       emails.length,
+    unread:      emails.filter(e => !e.is_read).length,
+    actionable:  emails.filter(e => e.is_actionable).length,
+    highPriority: emails.filter(e => e.ai_priority === 'high').length,
+    replySent:   emails.filter(e => e.reply_sent).length,
+    receivedToday: emails.filter(e => e.received_at?.startsWith(today)).length,
+  }
+
+  // Today's todo stats
+  const { data: todoRows } = await supabase
+    .from('daily_todos')
+    .select('id, status, priority')
+    .eq('member_id', member.id)
+    .eq('due_date', today)
+
+  const todos = todoRows ?? []
+  const todoStats = {
+    total:      todos.length,
+    pending:    todos.filter(t => t.status === 'pending').length,
+    inProgress: todos.filter(t => t.status === 'in_progress').length,
+    completed:  todos.filter(t => t.status === 'completed').length,
+    deferred:   todos.filter(t => t.status === 'deferred').length,
+  }
+
+  // KB sync status
+  const { data: lastSync } = await supabase
+    .from('kb_sync_jobs')
+    .select('status, completed_at, kb_entries_added')
+    .eq('member_id', member.id)
+    .eq('status', 'completed')
+    .order('completed_at', { ascending: false })
+    .limit(1)
     .single()
 
-  // Reply source breakdown this week
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
-
-  const { data: weekMessages } = await supabase
-    .from('email_thread_messages')
-    .select('source, response_minutes, sent_at')
-    .eq('owner_member_id', member.id)
-    .eq('direction', 'outbound')
-    .gte('sent_at', weekAgo)
-
-  const appReplies   = weekMessages?.filter(m => m.source === 'app').length ?? 0
-  const gmailReplies = weekMessages?.filter(m => m.source === 'gmail').length ?? 0
-  const avgThisWeek  = weekMessages?.length
-    ? Math.round(
-        weekMessages.reduce((s, m) => s + (m.response_minutes ?? 0), 0) / weekMessages.length
-      )
-    : null
-
   return NextResponse.json({
-    stats: stats ?? {},
-    thisWeek: { appReplies, gmailReplies, avgThisWeek },
+    inbox:   inboxStats,
+    todos:   todoStats,
+    kbSync:  {
+      lastSyncAt:      lastSync?.completed_at ?? null,
+      lastEntriesAdded: lastSync?.kb_entries_added ?? 0,
+    },
   })
 }

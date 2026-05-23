@@ -24,6 +24,7 @@ export const authOptions: NextAuthOptions = {
             'profile',
             'https://www.googleapis.com/auth/gmail.readonly',
             'https://www.googleapis.com/auth/gmail.modify',
+            'https://www.googleapis.com/auth/gmail.send',
           ].join(' '),
           access_type: 'offline',
           prompt: 'consent',
@@ -32,54 +33,67 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, account, profile, trigger, session: s }) {
+    async jwt({ token, account, profile, trigger }) {
+      // On sign-in, store raw OAuth tokens in the JWT
       if (account) {
-        token.accessToken = account.access_token
+        token.accessToken  = account.access_token
         token.refreshToken = account.refresh_token
-        token.googleId = (profile as any)?.sub
+        token.googleId     = (profile as any)?.sub
       }
+
+      // Refresh member details from DB on every sign-in or when fields are stale
       if (trigger === 'signIn' || trigger === 'update' || !token.memberName || !token.role) {
         const supabase = getServiceClient()
         const { data: member } = await supabase
           .from('team_members')
-          .select('id, role, name')
+          .select('id, role, name, consent_given')
           .eq('email', token.email ?? '')
           .single()
+
         if (member) {
-          token.role       = member.role
-          token.memberName = member.name
-          token.memberId   = member.id
+          token.role         = member.role
+          token.memberName   = member.name
+          token.memberId     = member.id
+          token.consentGiven = member.consent_given
         }
       }
+
       return token
     },
+
     async session({ session, token }) {
       session.accessToken  = token.accessToken
       session.refreshToken = token.refreshToken
+
       if (session.user) {
-        if (token.memberName) session.user.name     = token.memberName as string
-        if (token.role)       session.user.role     = token.role as TeamRole
-        if (token.memberId)   session.user.memberId = token.memberId as string
+        if (token.memberName)   session.user.name          = token.memberName as string
+        if (token.role)         session.user.role          = token.role as TeamRole
+        if (token.memberId)     session.user.memberId      = token.memberId as string
+        // Expose consent_given for client-side gating
+        ;(session.user as any).consentGiven = token.consentGiven ?? false
       }
+
       return session
     },
+
     async redirect({ url, baseUrl }) {
-      // Always land on the dashboard root after sign-in
+      // After sign-in, always land on dashboard root; consent page handled client-side
       if (url.startsWith(baseUrl)) return baseUrl
-      if (url.startsWith('/')) return `${baseUrl}${url}`
+      if (url.startsWith('/'))     return `${baseUrl}${url}`
       return baseUrl
     },
+
     async signIn({ user, account, profile }) {
-      // Rule 1: Google only
+      // Rule 1: Google OAuth only
       if (account?.provider !== 'google') return false
 
-      // Rule 2: org domain check
+      // Rule 2: org domain allow-list (if configured)
       const orgDomain = process.env.ORG_DOMAIN
       if (orgDomain && !profile?.email?.endsWith(`@${orgDomain}`)) {
         return '/login?error=unauthorized'
       }
 
-      // Rule 3: must be a pre-registered active team member
+      // Rule 3: must be a pre-registered, active team member
       const supabase = getServiceClient()
       const { data: member } = await supabase
         .from('team_members')
@@ -91,62 +105,52 @@ export const authOptions: NextAuthOptions = {
         return '/login?error=unauthorized'
       }
 
-      // Existing: upsert user row + connected_accounts
       if (!user.email) return false
 
       try {
+        // Upsert the users row (auth record)
         const { data: userData, error: userError } = await supabase
           .from('users')
-          .upsert({ email: user.email, name: user.name }, { onConflict: 'email' })
+          .upsert(
+            { email: user.email, name: user.name },
+            { onConflict: 'email' }
+          )
           .select('id')
           .single()
 
         if (userError || !userData) {
-          console.error('Failed to upsert user:', userError)
+          console.error('[Auth] Failed to upsert user:', userError)
           return false
         }
 
+        // Persist encrypted Gmail tokens to member_gmail_tokens
         if (account?.provider === 'google' && account.access_token) {
-          await supabase.from('connected_accounts').upsert(
+          await supabase.from('member_gmail_tokens').upsert(
             {
-              user_id: (userData as any).id,
-              provider: 'gmail',
-              email: user.email,
-              access_token: encryptToken(account.access_token),
-              refresh_token: account.refresh_token ? encryptToken(account.refresh_token) : null,
-              status: 'active',
+              member_id:     member.id,
+              access_token:  encryptToken(account.access_token),
+              refresh_token: account.refresh_token
+                ? encryptToken(account.refresh_token)
+                : null,
+              expires_at: account.expires_at
+                ? new Date(account.expires_at * 1000).toISOString()
+                : null,
+              updated_at: new Date().toISOString(),
             },
-            { onConflict: 'user_id, email' }
+            { onConflict: 'member_id' }
           )
 
-          // Also persist tokens to member_gmail_tokens for the reply feature
-          if (member?.id) {
-            await supabase.from('member_gmail_tokens').upsert(
-              {
-                member_id:     member.id,
-                access_token:  encryptToken(account.access_token),
-                refresh_token: encryptToken(account.refresh_token ?? ''),
-                expires_at:    account.expires_at
-                  ? new Date(account.expires_at * 1000).toISOString()
-                  : null,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: 'member_id' }
-            )
-          }
-
-          // Update team_members.supabase_uid so inbox status
-          // reflects correctly in Manage Users page
+          // Link the Supabase user ID to team_members (only set once — never overwrite)
           await supabase
             .from('team_members')
             .update({ supabase_uid: String(userData.id) })
             .eq('email', user.email)
-            .is('supabase_uid', null)  // only set once — never overwrite
+            .is('supabase_uid', null)
         }
 
         return true
       } catch (err) {
-        console.error('Sign-in callback error:', err)
+        console.error('[Auth] Sign-in callback error:', err)
         return false
       }
     },

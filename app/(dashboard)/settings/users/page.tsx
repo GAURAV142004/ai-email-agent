@@ -248,11 +248,7 @@ export default function ManageUsersPage() {
               const colors  = ROLE_COLORS[r] ?? { bg: 'bg-slate-100 dark:bg-slate-700', text: 'text-slate-600 dark:text-slate-400' }
               const initials = m.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
               const isSelf  = m.id === (session.user as any)?.memberId
-              const managerName = m.manager_id
-                ? (members.find(x => x.id === m.manager_id)?.name ?? 'Unknown')
-                : m.role === 'delivery_lead'
-                  ? '—'
-                  : 'Not assigned'
+              const managerName = m.role === 'delivery_lead' ? '—' : 'Not assigned'
 
               return (
                 <div
@@ -284,9 +280,9 @@ export default function ManageUsersPage() {
                   {/* Manager */}
                   <span className={cn(
                     'text-xs truncate',
-                    m.manager_id
-                      ? 'text-slate-600 dark:text-slate-300'
-                      : 'text-slate-400 dark:text-slate-500 italic'
+                    m.role !== 'delivery_lead'
+                      ? 'text-slate-400 dark:text-slate-500 italic'
+                      : 'text-slate-600 dark:text-slate-300'
                   )}>
                     {managerName}
                   </span>

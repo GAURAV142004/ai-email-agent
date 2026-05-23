@@ -64,8 +64,9 @@ export async function DELETE(
 
   const supabase = getServiceSupabase()
 
+  // Check if member has KB entries — soft-delete instead of hard-delete
   const { count } = await supabase
-    .from('email_threads')
+    .from('email_knowledge_base')
     .select('id', { count: 'exact', head: true })
     .eq('owner_member_id', id)
 
@@ -75,7 +76,7 @@ export async function DELETE(
       .update({ is_active: false })
       .eq('id', id)
 
-    return NextResponse.json({ deactivated: true, reason: 'Member has email history' })
+    return NextResponse.json({ deactivated: true, reason: 'Member has KB history' })
   }
 
   const { error } = await supabase

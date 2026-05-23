@@ -41,17 +41,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
       if (memberTokens) {
         accessToken  = safeDecrypt((memberTokens as any).access_token)
-        refreshToken = safeDecrypt((memberTokens as any).refresh_token)
+        refreshToken = (memberTokens as any).refresh_token
+          ? safeDecrypt((memberTokens as any).refresh_token)
+          : null
       } else {
-        const { data: account } = await supabase
-          .from('connected_accounts')
-          .select('access_token, refresh_token')
-          .eq('email', member.email)
-          .eq('status', 'active')
-          .single()
-        if (!account) continue
-        accessToken  = safeDecrypt((account as any).access_token)
-        refreshToken = safeDecrypt((account as any).refresh_token)
+        continue // no tokens — skip
       }
 
       if (!accessToken || !refreshToken) continue

@@ -1,29 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { getServiceSupabase } from '@/lib/auth'
-
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  const auth = request.headers.get('authorization')
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
-
-  const supabase = getServiceSupabase()
-  const slaMinutes = Number(process.env.SLA_RED_MINUTES ?? '1440')
-  const cutoff = new Date(Date.now() - slaMinutes * 60 * 1000).toISOString()
-
-  const { data, error } = await supabase
-    .from('email_threads')
-    .update({ reply_status: 'overdue' })
-    .eq('reply_status', 'pending')
-    .lt('received_at', cutoff)
-    .select('id')
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-
-  return NextResponse.json({
-    marked_overdue: data?.length ?? 0,
-    cutoff,
-  })
-}
+import { NextResponse } from 'next/server'
+// This route references tables removed in migration 008.
+// Use the new personal inbox and KB agent endpoints instead.
+export function GET()    { return NextResponse.json({ error: 'Endpoint removed. See /api/personal/inbox and /api/agent/query.' }, { status: 410 }) }
+export function POST()   { return NextResponse.json({ error: 'Endpoint removed. See /api/personal/inbox and /api/agent/query.' }, { status: 410 }) }
+export function PATCH()  { return NextResponse.json({ error: 'Endpoint removed.' }, { status: 410 }) }
+export function DELETE() { return NextResponse.json({ error: 'Endpoint removed.' }, { status: 410 }) }

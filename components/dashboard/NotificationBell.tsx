@@ -4,30 +4,41 @@ import { useState, useEffect, useRef } from 'react'
 import { Bell, Mail, AlertCircle, Clock } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 
-interface PendingEmail {
+interface InboxEmail {
   id: string
-  subject: string
-  from_email: string
+  subject: string | null
+  from_email: string | null
   received_at: string
+  reply_sent: boolean
 }
 
-interface PendingData {
-  pending_count: number
-  overdue_count: number
-  today_count: number
-  pending: PendingEmail[]
-  overdue: PendingEmail[]
+interface Derived {
+  pending:      InboxEmail[]
+  overdue:      InboxEmail[]
+  todayCount:   number
+}
+
+function derive(emails: InboxEmail[]): Derived {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000)
+  const todayStr = new Date().toISOString().slice(0, 10)
+
+  const unreplied = emails.filter(e => !e.reply_sent)
+  const overdue   = unreplied.filter(e => new Date(e.received_at) < cutoff)
+  const pending   = unreplied.filter(e => new Date(e.received_at) >= cutoff)
+  const todayCount = emails.filter(e => e.received_at?.startsWith(todayStr)).length
+
+  return { pending, overdue, todayCount }
 }
 
 export function NotificationBell() {
-  const [data, setData]       = useState<PendingData | null>(null)
+  const [derived, setDerived] = useState<Derived>({ pending: [], overdue: [], todayCount: 0 })
   const [open, setOpen]       = useState(false)
   const [loading, setLoading] = useState(true)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    fetchPending()
-    const interval = setInterval(fetchPending, 5 * 60 * 1000)
+    fetchInbox()
+    const interval = setInterval(fetchInbox, 5 * 60 * 1000)
     return () => clearInterval(interval)
   }, [])
 
@@ -40,26 +51,27 @@ export function NotificationBell() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  async function fetchPending() {
+  async function fetchInbox() {
     try {
-      const res  = await fetch('/api/me/pending')
+      const res  = await fetch('/api/personal/inbox?actionable=true&limit=50')
+      if (!res.ok) return
       const json = await res.json()
-      setData(json)
+      setDerived(derive(json.emails ?? []))
     } catch { /* silent */ }
     finally { setLoading(false) }
   }
 
   useEffect(() => {
-    if (!data || data.overdue_count === 0) return
+    if (derived.overdue.length === 0) return
     if ('Notification' in window && Notification.permission === 'granted') {
       new Notification('Overdue emails need your attention', {
-        body: `You have ${data.overdue_count} overdue email${data.overdue_count > 1 ? 's' : ''} waiting for reply`,
+        body: `You have ${derived.overdue.length} overdue email${derived.overdue.length > 1 ? 's' : ''} waiting for reply`,
         icon: '/favicon.ico',
       })
     }
-  }, [data?.overdue_count])
+  }, [derived.overdue.length])
 
-  const totalCount = (data?.pending_count ?? 0) + (data?.overdue_count ?? 0)
+  const totalCount = derived.pending.length + derived.overdue.length
 
   return (
     <div className="relative" ref={ref}>
@@ -88,14 +100,14 @@ export function NotificationBell() {
               Notifications
             </p>
             <div className="flex items-center gap-2">
-              {(data?.overdue_count ?? 0) > 0 && (
+              {derived.overdue.length > 0 && (
                 <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400">
-                  {data!.overdue_count} overdue
+                  {derived.overdue.length} overdue
                 </span>
               )}
-              {(data?.today_count ?? 0) > 0 && (
+              {derived.todayCount > 0 && (
                 <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
-                  {data!.today_count} today
+                  {derived.todayCount} today
                 </span>
               )}
             </div>
@@ -116,12 +128,12 @@ export function NotificationBell() {
               </div>
             )}
 
-            {(data?.overdue ?? []).length > 0 && (
+            {derived.overdue.length > 0 && (
               <div>
                 <p className="px-4 py-2 text-[11px] font-semibold text-red-500 uppercase tracking-wide bg-red-50 dark:bg-red-900/10">
                   Overdue
                 </p>
-                {data!.overdue.slice(0, 5).map(email => (
+                {derived.overdue.slice(0, 5).map(email => (
                   <div key={email.id}
                     className="px-4 py-3 border-b border-slate-50 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
                   >
@@ -132,7 +144,7 @@ export function NotificationBell() {
                           {email.subject || '(No subject)'}
                         </p>
                         <p className="text-[11px] text-slate-400 mt-0.5">
-                          {email.from_email} · {formatDistanceToNow(new Date(email.received_at), { addSuffix: true })}
+                          {formatDistanceToNow(new Date(email.received_at), { addSuffix: true })}
                         </p>
                       </div>
                     </div>
@@ -141,12 +153,12 @@ export function NotificationBell() {
               </div>
             )}
 
-            {(data?.pending ?? []).length > 0 && (
+            {derived.pending.length > 0 && (
               <div>
                 <p className="px-4 py-2 text-[11px] font-semibold text-amber-600 uppercase tracking-wide bg-amber-50 dark:bg-amber-900/10">
                   Pending Reply
                 </p>
-                {data!.pending.slice(0, 5).map(email => (
+                {derived.pending.slice(0, 5).map(email => (
                   <div key={email.id}
                     className="px-4 py-3 border-b border-slate-50 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
                   >
@@ -157,7 +169,7 @@ export function NotificationBell() {
                           {email.subject || '(No subject)'}
                         </p>
                         <p className="text-[11px] text-slate-400 mt-0.5">
-                          {email.from_email} · {formatDistanceToNow(new Date(email.received_at), { addSuffix: true })}
+                          {formatDistanceToNow(new Date(email.received_at), { addSuffix: true })}
                         </p>
                       </div>
                     </div>
@@ -170,7 +182,7 @@ export function NotificationBell() {
           {totalCount > 0 && (
             <div className="px-4 py-2.5 border-t border-slate-100 dark:border-slate-800">
               <a
-                href="/#needs-reply"
+                href="/"
                 onClick={() => setOpen(false)}
                 className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
               >

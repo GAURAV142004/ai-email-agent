@@ -68,6 +68,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const ruleType = rule_type as ClassificationRuleType
 
+  // Length guards
+  if (value && typeof value === 'string' && value.length > 254) {
+    return NextResponse.json({ error: 'value exceeds maximum length of 254 characters' }, { status: 400 })
+  }
+  if (description && typeof description === 'string' && description.length > 500) {
+    return NextResponse.json({ error: 'description exceeds maximum length of 500 characters' }, { status: 400 })
+  }
+
   // ai_inference rules must have a null value; all other types require a non-empty value
   if (ruleType === 'ai_inference') {
     if (value !== null && value !== undefined && value !== '') {
@@ -100,7 +108,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     .single()
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    console.error('[ClassificationRules] Insert error:', error.message)
+    return NextResponse.json({ error: 'Failed to save rule. Please try again.' }, { status: 500 })
   }
 
   return NextResponse.json({ rule: data }, { status: 201 })

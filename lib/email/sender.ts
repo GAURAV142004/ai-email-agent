@@ -28,8 +28,7 @@ export async function sendInviteEmail({
     ?? 'Email Intelligence Platform'
   const appUrl    = process.env.NEXT_PUBLIC_APP_URL
     ?? ''
-  const fromEmail = process.env.GMAIL_SMTP_USER
-    ?? 'gauravrpawar1349@gmail.com'
+  const fromEmail = process.env.GMAIL_SMTP_USER ?? ''
 
   // Dev mode: SMTP not configured → log to console
   const isDev = !process.env.GMAIL_SMTP_USER ||

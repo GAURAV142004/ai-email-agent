@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getMemberFromSession } from '@/lib/auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
 
 const bedrock = new BedrockRuntimeClient({
@@ -14,6 +15,15 @@ const MODEL_ID = process.env.BEDROCK_MODEL_ID ?? 'amazon.nova-lite-v1:0'
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const member = await getMemberFromSession()
   if (!member) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // Rate limit: 10 drafts per minute per member
+  const rl = checkRateLimit(`draft:${member.id}`, 10, 60_000)
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'Too many draft requests. Please wait a moment.' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } }
+    )
+  }
 
   let body: unknown
   try { body = await request.json() } catch {

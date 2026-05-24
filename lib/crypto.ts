@@ -1,7 +1,12 @@
 import crypto from 'crypto'
 
-// TOKEN_ENCRYPTION_KEY must be exactly 32 ASCII characters (32 bytes for AES-256)
-const SECRET = process.env.TOKEN_ENCRYPTION_KEY!
+const rawKey = process.env.TOKEN_ENCRYPTION_KEY
+if (!rawKey || rawKey.length !== 32) {
+  throw new Error(
+    `TOKEN_ENCRYPTION_KEY must be exactly 32 ASCII characters. Got ${rawKey?.length ?? 0}.`
+  )
+}
+const SECRET = rawKey
 
 export function encryptToken(plain: string): string {
   const iv = crypto.randomBytes(16)

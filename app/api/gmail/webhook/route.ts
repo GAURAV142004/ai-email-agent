@@ -49,7 +49,8 @@ async function processWebhookDualPath(notification: PubSubMessage): Promise<void
     .single()
 
   if (!member) {
-    console.error(`[Webhook] No active member for ${notification.emailAddress}`)
+    // Don't log the email address — prevents user enumeration via logs
+    console.error('[Webhook] Notification received for unknown or inactive member')
     return
   }
 
@@ -187,23 +188,32 @@ async function processWebhookDualPath(notification: PubSubMessage): Promise<void
 
 // Google Pub/Sub push endpoint — must ACK with 200 quickly to avoid retries
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // Verify the request carries our webhook secret (added as ?token=... in the
+  // Pub/Sub push subscription URL when the subscription was created).
+  const { searchParams } = new URL(request.url)
+  const providedToken    = searchParams.get('token')
+  const expectedToken    = process.env.CRON_SECRET // reuse existing secret
+
+  if (!expectedToken || !providedToken || providedToken !== expectedToken) {
+    // Return 200 so Pub/Sub doesn't keep retrying — but do nothing.
+    return NextResponse.json({ ok: false }, { status: 200 })
+  }
+
   let body: unknown
   try {
     body = await request.json()
   } catch {
-    // Malformed payload — ACK so Pub/Sub doesn't retry
-    return NextResponse.json({ ok: false, error: 'Invalid JSON' }, { status: 200 })
+    return NextResponse.json({ ok: false }, { status: 200 })
   }
 
   const notification = decodePubSubMessage(body)
   if (!notification) {
-    // ACK invalid/test messages so Pub/Sub stops retrying them
-    return NextResponse.json({ ok: false, error: 'Invalid message' }, { status: 200 })
+    return NextResponse.json({ ok: false }, { status: 200 })
   }
 
   // Fire-and-forget: fast ACK, process asynchronously
-  processWebhookDualPath(notification).catch((err) => {
-    console.error('[Webhook] Unhandled processing error:', err)
+  processWebhookDualPath(notification).catch(() => {
+    // Errors logged inside processWebhookDualPath
   })
 
   return NextResponse.json({ ok: true })

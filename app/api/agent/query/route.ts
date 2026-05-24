@@ -3,6 +3,7 @@ import { getConsentedMember, getServiceSupabase } from '@/lib/auth'
 import { searchKB } from '@/lib/kb/search'
 import { checkKBAccess, checkResponseSafety } from '@/lib/compliance/access-guard'
 import { logKBQuery } from '@/lib/compliance/audit-logger'
+import { checkRateLimit } from '@/lib/rate-limit'
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
 import type { TeamRole } from '@/lib/roles'
 
@@ -64,11 +65,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const member = await getConsentedMember()
   if (!member) return NextResponse.json({ error: 'Unauthorized or consent not given' }, { status: 401 })
 
+  // Rate limit: 30 queries per minute per member
+  const rl = checkRateLimit(`agent:${member.id}`, 30, 60_000)
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please wait before asking another question.' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } }
+    )
+  }
+
   const body            = await request.json().catch(() => ({}))
   const question        = (body?.question ?? '').trim()
   const conversationId  = body?.conversationId as string | undefined
 
   if (!question) return NextResponse.json({ error: 'question is required' }, { status: 400 })
+  if (question.length > 2000) return NextResponse.json({ error: 'Question too long (max 2000 chars)' }, { status: 400 })
 
   const supabase = getServiceSupabase()
 
@@ -80,7 +91,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const access = checkKBAccess({ viewerRole: member.role, queryText: question, targetMemberRole: mentioned?.role })
   if (!access.allowed) {
     await logKBQuery(supabase, { queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id, wasBlocked: true, blockReason: access.blockReason ?? undefined, personalTopicsFound: access.personalTopicsFound })
-    return NextResponse.json({ answer: access.blockReason, wasBlocked: true, blockReason: access.blockReason, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0 })
+    // Return a generic message — don't expose internal role/rule details
+    const safeBlockMsg = 'This query touches on topics outside the scope of the project knowledge base and cannot be answered.'
+    return NextResponse.json({ answer: safeBlockMsg, wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0 })
   }
 
   // ── KB search ───────────────────────────────────────────────────────────────

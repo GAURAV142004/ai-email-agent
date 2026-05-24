@@ -1,8 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { timingSafeEqual } from 'crypto'
 import { runKBSync } from '@/lib/kb/run-sync'
 
+function verifyCronSecret(authHeader: string | null): boolean {
+  const secret = process.env.CRON_SECRET
+  if (!secret || !authHeader) return false
+  const expected = `Bearer ${secret}`
+  if (authHeader.length !== expected.length) return false
+  try {
+    return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected))
+  } catch {
+    return false
+  }
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  if (request.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(request.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

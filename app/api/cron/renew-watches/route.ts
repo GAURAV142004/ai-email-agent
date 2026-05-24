@@ -1,11 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { timingSafeEqual } from 'crypto'
 import { getServiceSupabase } from '@/lib/auth'
 import { google } from 'googleapis'
 import { safeDecrypt } from '@/lib/crypto'
 
+function verifyCronSecret(authHeader: string | null): boolean {
+  const secret = process.env.CRON_SECRET
+  if (!secret || !authHeader) return false
+  const expected = `Bearer ${secret}`
+  if (authHeader.length !== expected.length) return false
+  try {
+    return timingSafeEqual(Buffer.from(authHeader), Buffer.from(expected))
+  } catch {
+    return false
+  }
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const auth = request.headers.get('authorization')
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!verifyCronSecret(request.headers.get('authorization'))) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

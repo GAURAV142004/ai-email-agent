@@ -23,8 +23,20 @@ import {
 import type { AgentConversation, AgentMessage } from '@/lib/supabase/types'
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+}
+
 function renderMarkdown(content: string): string {
-  return content
+  // Escape all HTML first to prevent XSS — then apply safe markdown substitutions
+  const safe = escapeHtml(content)
+  return safe
     // Headers
     .replace(/^### (.+)$/gm, '<h3 class="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-3 mb-1">$1</h3>')
     .replace(/^## (.+)$/gm, '<h2 class="text-base font-semibold text-slate-800 dark:text-slate-200 mt-4 mb-1.5">$1</h2>')

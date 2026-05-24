@@ -47,21 +47,28 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 
 /**
  * Format a KB entry's text for embedding.
- * Concatenates summary + key points — rich enough for semantic search
- * without including raw email content.
+ * Includes summary, key points, and action items so queries like
+ * "pending action items" or "what tasks are assigned" score correctly.
  */
 export function buildEmbeddingText(params: {
-  summary: string
-  keyPoints: string[]
+  summary:         string
+  keyPoints:       string[]
   detectedProject: string | null
-  subject: string
+  subject:         string
+  actionItems?:    Array<{ task: string; owner_hint?: string | null }>
 }): string {
+  const actionTexts = (params.actionItems ?? [])
+    .map(a => a.owner_hint ? `${a.task} (${a.owner_hint})` : a.task)
+
   const parts = [
     params.detectedProject ? `Project: ${params.detectedProject}` : null,
     `Subject: ${params.subject}`,
     `Summary: ${params.summary}`,
     params.keyPoints.length > 0
       ? `Key points: ${params.keyPoints.join('. ')}`
+      : null,
+    actionTexts.length > 0
+      ? `Action items: ${actionTexts.join('. ')}`
       : null,
   ]
   return parts.filter(Boolean).join('\n')

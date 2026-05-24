@@ -211,6 +211,13 @@ export default function AgentPage() {
     if (session) fetchConversations()
   }, [session]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-restore the most recent conversation when the sidebar first loads
+  useEffect(() => {
+    if (conversations.length > 0 && !currentConvId) {
+      loadConversation(conversations[0].id)
+    }
+  }, [conversations]) // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, generating])

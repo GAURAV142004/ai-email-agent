@@ -55,8 +55,8 @@ export async function searchKB(
   // We use a raw SQL RPC for the vector operation
   const { data: entries, error } = await supabase.rpc('search_kb_by_embedding', {
     query_embedding: vectorLiteral,
-    match_threshold: 0.3,
-    match_count:     limit * 2, // fetch more then filter
+    match_threshold: 0.25,
+    match_count:     limit * 2,
     member_ids:      visibleMemberIds,
     date_from:       params.dateFrom ?? null,
     date_to:         params.dateTo ?? null,
@@ -142,11 +142,17 @@ async function keywordFallback(
 ): Promise<KBSearchResult[]> {
   const visibleMemberIds = visibleMembers.map(m => m.id)
 
+  // Search across summary, key_points, detected_project, and action_items text
+  const q = params.query.replace(/'/g, "''") // basic SQL escape for the filter string
   let query = supabase
     .from('email_knowledge_base')
     .select('*')
     .in('owner_member_id', visibleMemberIds)
-    .or(`summary.ilike.%${params.query}%,detected_project.ilike.%${params.query}%`)
+    .or([
+      `summary.ilike.%${q}%`,
+      `detected_project.ilike.%${q}%`,
+      `key_points.cs.{"${q}"}`,
+    ].join(','))
     .order('email_date', { ascending: false })
     .limit(limit)
 

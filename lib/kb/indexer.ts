@@ -92,6 +92,7 @@ export async function indexEmailToKB(
   const embeddingText = buildEmbeddingText({
     summary:         summary.summary,
     keyPoints:       summary.keyPoints,
+    actionItems:     summary.actionItems,
     detectedProject: summary.detectedProject,
     subject:         params.subject,
   })

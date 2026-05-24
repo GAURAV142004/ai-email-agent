@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 import path from "path";
 
 const nextConfig: NextConfig = {
+  // pdf-parse and mammoth are Node.js-only — exclude from Turbopack bundling
+  serverExternalPackages: ['pdf-parse', 'mammoth'],
   turbopack: {
     root: path.resolve(__dirname),
   },

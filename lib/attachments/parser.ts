@@ -76,9 +76,10 @@ export async function extractText(
 }
 
 async function parsePDF(buffer: Buffer): Promise<ParseResult> {
-  // Use lib path directly to avoid Next.js test-file loading issue with pdf-parse
+  // pdf-parse is declared as serverExternalPackages — Node.js resolves it natively,
+  // Turbopack never bundles it, so require() works safely here.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const pdfParse = require('pdf-parse/lib/pdf-parse.js') as (
+  const pdfParse = require('pdf-parse') as (
     buf: Buffer,
   ) => Promise<{ text: string; numpages: number }>
 

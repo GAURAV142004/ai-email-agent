@@ -18,123 +18,156 @@ const bedrock = new BedrockRuntimeClient({
 })
 const MODEL_ID = process.env.BEDROCK_MODEL_ID ?? 'amazon.nova-lite-v1:0'
 
-// ── Fetch prior turns for conversation memory ────────────────────────────────
-async function fetchConversationHistory(
-  supabase: SupabaseClient,
-  conversationId: string,
-): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
-  const { data: msgs } = await supabase
+type HistoryMsg = { role: 'user' | 'assistant'; content: string }
+
+// ── Load conversation history ────────────────────────────────────────────────
+async function fetchHistory(supabase: SupabaseClient, convId: string): Promise<HistoryMsg[]> {
+  const { data } = await supabase
     .from('agent_messages')
     .select('role, content')
-    .eq('conversation_id', conversationId)
+    .eq('conversation_id', convId)
     .order('created_at', { ascending: true })
-    .limit(10)  // last 5 turns (user + assistant pairs)
+    .limit(14)  // 7 turns
 
-  return (msgs ?? []).filter(
-    (m): m is { role: 'user' | 'assistant'; content: string } =>
-      m.role === 'user' || m.role === 'assistant',
+  return (data ?? []).filter(
+    (m): m is HistoryMsg => m.role === 'user' || m.role === 'assistant',
   )
 }
 
-// ── AI synthesis with conversation memory ────────────────────────────────────
-async function synthesizeAnswer(
-  question:           string,
-  emailResults:       KBSearchResult[],
-  attachmentResults:  AttachmentSearchResult[],
-  history:            Array<{ role: 'user' | 'assistant'; content: string }>,
-  projectFocus:       string | null,
-): Promise<{ text: string; tokensUsed: number }> {
-  // Build KB context block
-  const emailCtx = emailResults.map((r, i) => {
-    const e = r.entry
-    return [
-      `[Email ${i + 1}]`,
-      `Member: ${r.memberName} (${r.memberRole})`,
-      `Project: ${e.detected_project ?? 'Unknown'}`,
-      `Date: ${e.email_date ? new Date(e.email_date).toLocaleDateString() : 'Unknown'}`,
-      `Summary: ${e.summary}`,
-      e.key_points?.length   ? `Key Points: ${e.key_points.join(' | ')}`                                         : null,
-      e.action_items?.length ? `Action Items: ${(e.action_items as any[]).map((a: any) => a.task).join(' | ')}` : null,
-    ].filter(Boolean).join('\n')
-  }).join('\n\n---\n\n')
+// ── Build an enriched search query from conversation context ─────────────────
+// Short / vague messages ("and the deadline?", "tell me more", "who owns it?")
+// get enriched with the last user+assistant exchange so vector search finds
+// the right KB entries even without explicit topic keywords.
+function buildSearchQuery(question: string, history: HistoryMsg[]): string {
+  const words = question.trim().split(/\s+/).length
 
-  const attachCtx = attachmentResults.map((r, i) => {
-    const a = r.attachment
-    return [
-      `[Document ${i + 1}]`,
-      `File: ${a.filename}`,
-      `Shared by: ${r.memberName} (${r.memberRole})`,
-      `Date: ${a.email_date ? new Date(a.email_date).toLocaleDateString() : 'Unknown'}`,
-      `Summary: ${a.summary ?? 'No summary available'}`,
-      a.key_points?.length ? `Key Points: ${a.key_points.join(' | ')}` : null,
-    ].filter(Boolean).join('\n')
-  }).join('\n\n---\n\n')
-
-  const totalSources = emailResults.length + attachmentResults.length
-  const kbCtx = [
-    emailCtx  ? `=== EMAIL SUMMARIES ===\n${emailCtx}`       : null,
-    attachCtx ? `=== DOCUMENT ATTACHMENTS ===\n${attachCtx}` : null,
-  ].filter(Boolean).join('\n\n')
-
-  const projectLine = projectFocus
-    ? `The user is specifically asking about: "${projectFocus}". Prioritise information related to this project/topic.`
-    : 'The user is asking a general question across all projects.'
-
-  const system = `You are a project knowledge assistant for a software delivery team.
-You answer questions using ONLY the KB data provided. You have no other knowledge.
-When the user refers to something from earlier in the conversation, use the conversation history.
-${projectLine}
-
-RESPONSE RULES — follow strictly, no exceptions:
-1. Start with the direct answer. Never restate the question.
-2. Be concise: 1-4 sentences for simple facts, a short bullet list for 3+ items.
-3. Never write filler: no "In summary", "Moving forward", "By following this", "This ensures", "Overall".
-4. Never add per-point source labels like "Source:" or "Reference:". If citing, do it once inline: "(from [Name], [date])".
-5. Never hedge with "it appears", "it seems", "it was mentioned that". State facts directly.
-6. If the answer is not in the KB data or prior conversation, write only: "Not in the knowledge base."
-7. When listing action items, show: owner → task → due date (if known). No extra prose.
-8. When referencing a document, state its filename and the date it was shared.
-9. Never add conclusions or closing remarks.`
-
-  // Build multi-turn messages array (Nova supports native conversation history)
-  const messages: Array<{ role: string; content: Array<{ text: string }> }> = []
-
-  // Include last 6 messages (3 turns) as conversation context
-  for (const msg of history.slice(-6)) {
-    messages.push({ role: msg.role, content: [{ text: msg.content }] })
+  if (words <= 6 && history.length >= 2) {
+    const lastUser = [...history].reverse().find(m => m.role === 'user')
+    const lastBot  = [...history].reverse().find(m => m.role === 'assistant')
+    const ctx      = [
+      lastUser?.content?.slice(0, 150) ?? '',
+      lastBot?.content?.slice(0, 200)  ?? '',
+    ].filter(Boolean).join(' ')
+    return `${question} ${ctx}`.trim()
   }
 
-  // Current question with fresh KB context
-  const userTurn = `Question: ${question}
+  return question
+}
 
-KB Data (${totalSources} sources):
-${kbCtx}
+// ── Detect file export intent ────────────────────────────────────────────────
+const FILE_PATTERNS = [
+  /\b(export|download|generate|create|make|give me|send me|produce)\b.*\b(report|excel|xlsx|csv|pdf|sheet|spreadsheet|document|file)\b/i,
+  /\b(excel|xlsx|csv|pdf|spreadsheet)\b.*\b(report|summary|list|data)\b/i,
+  /\b(report|summary)\b.*\b(excel|xlsx|csv|pdf|file|download)\b/i,
+]
+function wantsFile(text: string): boolean {
+  return FILE_PATTERNS.some(p => p.test(text))
+}
 
-Answer:`
-
-  messages.push({ role: 'user', content: [{ text: userTurn }] })
-
-  const body = JSON.stringify({
+// ── Core AI call ─────────────────────────────────────────────────────────────
+async function callAI(
+  messages: Array<{ role: string; content: Array<{ text: string }> }>,
+  systemText: string,
+  maxTokens = 1400,
+): Promise<{ text: string; tokensUsed: number }> {
+  const body   = JSON.stringify({
     messages,
-    system:          [{ text: system }],
-    inferenceConfig: { maxTokens: 1200, temperature: 0.2 },
+    system:          [{ text: systemText }],
+    inferenceConfig: { maxTokens, temperature: 0.25 },
   })
-
   const resp   = await bedrock.send(new InvokeModelCommand({
-    modelId: MODEL_ID, contentType: 'application/json', accept: 'application/json', body: Buffer.from(body),
+    modelId: MODEL_ID, contentType: 'application/json', accept: 'application/json',
+    body: Buffer.from(body),
   }))
   const parsed = JSON.parse(Buffer.from(resp.body).toString('utf-8'))
-
   return {
-    text:       parsed.output?.message?.content?.[0]?.text ?? '',
+    text:       parsed.output?.message?.content?.[0]?.text?.trim() ?? '',
     tokensUsed: (parsed.usage?.inputTokens ?? 0) + (parsed.usage?.outputTokens ?? 0),
   }
 }
 
+// ── Build KB context string ───────────────────────────────────────────────────
+function buildKBContext(emails: KBSearchResult[], attachments: AttachmentSearchResult[]): string {
+  const emailPart = emails.map((r, i) => {
+    const e = r.entry
+    return [
+      `[Email ${i + 1} | ${r.memberName} | ${e.detected_project ?? 'Unknown project'} | ${e.email_date ? new Date(e.email_date).toLocaleDateString('en-IN') : 'Unknown date'}]`,
+      `Summary: ${e.summary}`,
+      e.key_points?.length   ? `Key facts: ${e.key_points.join(' • ')}`                                          : null,
+      e.action_items?.length ? `Action items: ${(e.action_items as any[]).map((a: any) => `${a.owner_hint ?? 'Team'} → ${a.task}${a.due_date_hint ? ` (by ${a.due_date_hint})` : ''}`).join(' | ')}` : null,
+    ].filter(Boolean).join('\n')
+  }).join('\n\n')
+
+  const docPart = attachments.map((r, i) => {
+    const a = r.attachment
+    return [
+      `[Doc ${i + 1} | ${a.filename} | shared by ${r.memberName} | ${a.email_date ? new Date(a.email_date).toLocaleDateString('en-IN') : 'Unknown date'}]`,
+      `Summary: ${a.summary ?? 'No summary'}`,
+      a.key_points?.length ? `Key facts: ${a.key_points.join(' • ')}` : null,
+    ].filter(Boolean).join('\n')
+  }).join('\n\n')
+
+  return [
+    emailPart ? `=== EMAILS ===\n${emailPart}` : null,
+    docPart   ? `=== DOCUMENTS ===\n${docPart}` : null,
+  ].filter(Boolean).join('\n\n')
+}
+
+// ── Synthesize response ──────────────────────────────────────────────────────
+async function synthesize(
+  question:     string,
+  kbContext:    string,
+  history:      HistoryMsg[],
+  totalSources: number,
+  requestsFile: boolean,
+): Promise<{ text: string; tokensUsed: number }> {
+  const system = `You are an intelligent project knowledge assistant for a software delivery team.
+Your knowledge comes from the team's synced project emails and documents shown in KB Data below.
+
+=== CORE BEHAVIOUR ===
+1. Understand the user's INTENT from natural language — don't require precise keywords.
+   "What's cooking with Infosys?" = project status for Infosys.
+   "Any updates on the API issue?" = status of API-related problems.
+   "Who's on it?" = who owns the last discussed task.
+2. Use CONVERSATION HISTORY to resolve references like "that task", "this project", "them", "it".
+3. If the question is genuinely ambiguous even with history, ask exactly ONE specific clarifying question. Never ask multiple questions.
+4. If KB data has the answer, state it directly. No hedging ("it appears", "it seems", "it was mentioned").
+5. If KB data does NOT have the answer, say: "I don't have that information in the knowledge base." Then suggest what the user could try ("try asking about X instead" or "sync the KB first").
+
+=== FORMAT RULES ===
+- Simple fact → 1-3 sentences.
+- Multiple items (3+) → bullet list with owner → task → date format for action items.
+- Never start with "Certainly!", "Great question!", "Of course!".
+- Never end with "I hope this helps!", "Let me know if you need anything else!", "Feel free to ask!".
+- No filler phrases: "In summary", "Overall", "Moving forward", "To summarize".
+${requestsFile ? `\n=== FILE EXPORT MODE ===\nThe user wants an exported file. Structure your response with clear headers (##), tables where data is tabular, and bullet lists. This will be converted to a downloadable file. Be thorough and include all relevant data from the KB.` : ''}
+
+=== SCOPE ===
+Only use project/work information. Never reveal personal details about team members.
+If asked about personal matters, politely redirect to project topics.`
+
+  const msgs: Array<{ role: string; content: Array<{ text: string }> }> = []
+
+  // Include up to 8 history messages (4 turns)
+  for (const m of history.slice(-8)) {
+    msgs.push({ role: m.role, content: [{ text: m.content }] })
+  }
+
+  // Current turn with KB context
+  const userText = totalSources > 0
+    ? `Question: ${question}\n\nKB Data (${totalSources} sources):\n${kbContext}\n\nAnswer based on the above:`
+    : `Question: ${question}\n\n(No matching KB entries found for this query.)\n\nRespond helpfully:`
+
+  msgs.push({ role: 'user', content: [{ text: userText }] })
+
+  return callAI(msgs, system, requestsFile ? 2000 : 1400)
+}
+
+// ── Response type detection ───────────────────────────────────────────────────
 function detectResponseType(text: string): string {
-  if (/\|\s*[-:]\s*\|/.test(text) || text.includes('| --- |')) return 'table'
-  if (/#{1,3}\s/.test(text)) return 'report'
-  if (/\d{4}-\d{2}-\d{2}|Q[1-4]\s+\d{4}/i.test(text)) return 'timeline'
+  if (/\|.+\|.+\|/.test(text) && text.includes('---')) return 'table'
+  if (/^#{1,3}\s/m.test(text))                          return 'report'
+  if (/\b(Q[1-4]|20\d\d)\b/i.test(text))               return 'timeline'
   return 'text'
 }
 
@@ -143,11 +176,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const member = await getConsentedMember()
   if (!member) return NextResponse.json({ error: 'Unauthorized or consent not given' }, { status: 401 })
 
-  // Rate limit: 30 queries per minute per member
   const rl = checkRateLimit(`agent:${member.id}`, 30, 60_000)
   if (!rl.allowed) {
     return NextResponse.json(
-      { error: 'Too many requests. Please wait before asking another question.' },
+      { error: 'Too many requests. Please wait a moment.' },
       { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } },
     )
   }
@@ -155,38 +187,43 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const body           = await request.json().catch(() => ({}))
   const question       = (body?.question ?? '').trim()
   const conversationId = body?.conversationId as string | undefined
-  const projectFocus   = (body?.projectFocus as string | undefined) ?? null
+  const explicitFormat = body?.docFormat as string | undefined   // 'xlsx' | 'csv' | 'pdf'
 
   if (!question) return NextResponse.json({ error: 'question is required' }, { status: 400 })
   if (question.length > 2000) return NextResponse.json({ error: 'Question too long (max 2000 chars)' }, { status: 400 })
 
   const supabase = getServiceSupabase()
 
-  // Detect if query mentions a specific team member
-  const { data: allMembers } = await supabase.from('team_members').select('id, name, role').eq('is_active', true)
+  // ── Mentioned member detection (for scoped search) ────────────────────────
+  const { data: allMembers } = await supabase
+    .from('team_members').select('id, name, role').eq('is_active', true)
   const mentioned = (allMembers ?? []).find(
     (m: any) => question.toLowerCase().includes(m.name.toLowerCase()),
   ) as { id: string; name: string; role: TeamRole } | undefined
 
-  // ── Compliance pre-check ──────────────────────────────────────────────────
+  // ── Compliance check ──────────────────────────────────────────────────────
   const access = checkKBAccess({ viewerRole: member.role, queryText: question, targetMemberRole: mentioned?.role })
   if (!access.allowed) {
     await logKBQuery(supabase, {
       queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id,
       wasBlocked: true, blockReason: access.blockReason ?? undefined, personalTopicsFound: access.personalTopicsFound,
     })
-    const safeBlockMsg = 'This query touches on topics outside the scope of the project knowledge base and cannot be answered.'
-    return NextResponse.json({ answer: safeBlockMsg, wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0 })
+    return NextResponse.json({
+      answer: 'That query touches on personal topics outside the scope of the project knowledge base.',
+      wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0,
+    })
   }
 
-  // ── Load conversation history (for AI memory) ──────────────────────────────
-  const history = conversationId
-    ? await fetchConversationHistory(supabase, conversationId)
-    : []
+  // ── Load conversation history in parallel with member check ───────────────
+  const history = conversationId ? await fetchHistory(supabase, conversationId) : []
 
-  // ── KB search — emails + attachments in parallel ──────────────────────────
+  // ── Build enriched search query ───────────────────────────────────────────
+  const searchQuery  = buildSearchQuery(question, history)
+  const requestsFile = !!(explicitFormat || wantsFile(question))
+
+  // ── KB search (emails + attachments in parallel) ──────────────────────────
   const searchParams = {
-    query: question, viewerRole: member.role, viewerMemberId: member.id,
+    query: searchQuery, viewerRole: member.role, viewerMemberId: member.id,
     memberIds: mentioned ? [mentioned.id] : undefined,
   }
 
@@ -196,29 +233,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   ])
 
   const totalSources = emailResults.length + attachmentResults.length
-
-  if (totalSources === 0 && history.length === 0) {
-    const noInfo = 'No relevant project information was found in the knowledge base for your query. The knowledge base may not have been synced recently, or this topic has not appeared in indexed emails or documents.'
-    await logKBQuery(supabase, { queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id, wasBlocked: false, kbEntriesAccessed: 0 })
-    return NextResponse.json({ answer: noInfo, wasBlocked: false, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0 })
-  }
+  const kbContext    = totalSources > 0 ? buildKBContext(emailResults, attachmentResults) : ''
 
   // ── AI synthesis ──────────────────────────────────────────────────────────
   let synth: { text: string; tokensUsed: number }
   try {
-    synth = await synthesizeAnswer(question, emailResults, attachmentResults, history, projectFocus)
-  } catch {
-    const fallback = [
-      ...emailResults.map(r      => `• ${r.memberName}: ${r.entry.summary}`),
-      ...attachmentResults.map(r => `• [Doc] ${r.attachment.filename}: ${r.attachment.summary}`),
-    ].join('\n')
-    synth = { text: fallback || 'No relevant information found.', tokensUsed: 0 }
+    synth = await synthesize(question, kbContext, history, totalSources, requestsFile)
+  } catch (err: any) {
+    // Fallback: bullet list of raw KB summaries so user gets SOMETHING
+    const fallback = totalSources > 0
+      ? [
+          ...emailResults.map(r     => `• ${r.entry.summary}`),
+          ...attachmentResults.map(r => `• [${r.attachment.filename}] ${r.attachment.summary ?? ''}`),
+        ].join('\n')
+      : 'The knowledge base returned no results for this query. Try rephrasing or syncing the KB first.'
+    synth = { text: fallback, tokensUsed: 0 }
   }
 
-  // ── Post-response safety ──────────────────────────────────────────────────
+  // ── Safety check ──────────────────────────────────────────────────────────
   const safety      = checkResponseSafety(synth.text)
-  const finalAnswer = safety.allowed ? synth.text : safety.blockReason!
-  const respType    = detectResponseType(finalAnswer)
+  const finalAnswer = safety.allowed ? synth.text : 'This response was blocked to protect team member privacy.'
+  const respType    = requestsFile && safety.allowed ? 'document' : detectResponseType(finalAnswer)
   const clusters    = [...new Set(emailResults.map(r => r.entry.detected_project).filter(Boolean) as string[])]
 
   // ── Persist conversation + messages ───────────────────────────────────────
@@ -226,31 +261,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!convId) {
     const { data: conv } = await supabase
       .from('agent_conversations')
-      .insert({
-        member_id:     member.id,
-        title:         projectFocus ? `[${projectFocus}] ${question.slice(0, 50)}` : question.slice(0, 60),
-        project_focus: projectFocus,
-      })
-      .select('id')
-      .single()
+      .insert({ member_id: member.id, title: question.slice(0, 70) })
+      .select('id').single()
     convId = conv?.id
   } else {
-    await supabase
-      .from('agent_conversations')
+    await supabase.from('agent_conversations')
       .update({ updated_at: new Date().toISOString() })
-      .eq('id', convId)
-      .eq('member_id', member.id)
+      .eq('id', convId).eq('member_id', member.id)
   }
 
   let messageId: string | undefined
   if (convId) {
-    // Insert user message
     await supabase.from('agent_messages').insert({
       conversation_id: convId, role: 'user', content: question,
     })
-    // Insert assistant message and capture its ID
-    const { data: aMsg } = await supabase
-      .from('agent_messages')
+    const { data: aMsg } = await supabase.from('agent_messages')
       .insert({
         conversation_id:             convId,
         role:                        'assistant',
@@ -260,31 +285,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         response_type:               respType,
         tokens_used:                 synth.tokensUsed,
         was_blocked:                 !safety.allowed,
-        block_reason:                safety.allowed ? null : safety.blockReason,
+        block_reason:                safety.allowed ? null : 'Personal topic detected in response',
       })
-      .select('id')
-      .single()
+      .select('id').single()
     messageId = aMsg?.id
   }
 
   // ── Audit log ─────────────────────────────────────────────────────────────
   await logKBQuery(supabase, {
     queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id,
-    wasBlocked: !safety.allowed, blockReason: safety.allowed ? undefined : (safety.blockReason ?? undefined),
-    personalTopicsFound: safety.personalTopicsFound, kbEntriesAccessed: totalSources,
+    wasBlocked: !safety.allowed, kbEntriesAccessed: totalSources,
     projectClustersHit: clusters, responseType: respType,
   })
 
   return NextResponse.json({
-    answer:          finalAnswer,
-    wasBlocked:      !safety.allowed,
-    blockReason:     safety.allowed ? undefined : safety.blockReason,
-    responseType:    respType,
-    projectClusters: clusters,
-    kbEntriesUsed:   totalSources,
-    conversationId:  convId,
-    projectFocus,
-    messageId,
-    tokensUsed:      synth.tokensUsed,
+    answer: finalAnswer, wasBlocked: !safety.allowed,
+    responseType: respType, projectClusters: clusters,
+    kbEntriesUsed: totalSources, conversationId: convId,
+    messageId, tokensUsed: synth.tokensUsed,
   })
 }

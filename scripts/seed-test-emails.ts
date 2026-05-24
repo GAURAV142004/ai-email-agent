@@ -11,8 +11,20 @@ import * as dotenv from 'dotenv'
 import { createClient } from '@supabase/supabase-js'
 import { google } from 'googleapis'
 import { OAuth2Client } from 'google-auth-library'
+import crypto from 'crypto'
 
 dotenv.config({ path: '.env.local' })
+
+// ─── Token decryption (mirrors lib/crypto.ts) ────────────────────────────────
+
+function safeDecrypt(token: string): string {
+  const looksEncrypted = token.includes(':') && !token.startsWith('ya29.') && !token.startsWith('1/')
+  if (!looksEncrypted) return token
+  const key = process.env.TOKEN_ENCRYPTION_KEY!
+  const [ivHex, encHex] = token.split(':')
+  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key), Buffer.from(ivHex, 'hex'))
+  return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString()
+}
 
 const RECIPIENT = 'vikas@fristinetech.com'
 let _counter = 1
@@ -1041,7 +1053,8 @@ async function main() {
     throw new Error(`No Gmail refresh token for member ${lead.id}. Have they connected Gmail?`)
   }
 
-  const gmail = await getGmailClient(tokenRow.refresh_token)
+  const refreshToken = safeDecrypt(tokenRow.refresh_token)
+  const gmail = await getGmailClient(refreshToken)
   console.log('Gmail client ready. Injecting email threads...\n')
 
   let totalEmails = 0

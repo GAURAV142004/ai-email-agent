@@ -7,24 +7,10 @@
  * Requires: .env.local with SUPABASE vars + GOOGLE_CLIENT_ID/SECRET
  */
 
-import * as dotenv from 'dotenv'
 import { createClient } from '@supabase/supabase-js'
 import { google } from 'googleapis'
 import { OAuth2Client } from 'google-auth-library'
-import crypto from 'crypto'
-
-dotenv.config({ path: '.env.local' })
-
-// ─── Token decryption (mirrors lib/crypto.ts) ────────────────────────────────
-
-function safeDecrypt(token: string): string {
-  const looksEncrypted = token.includes(':') && !token.startsWith('ya29.') && !token.startsWith('1/')
-  if (!looksEncrypted) return token
-  const key = process.env.TOKEN_ENCRYPTION_KEY!
-  const [ivHex, encHex] = token.split(':')
-  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key), Buffer.from(ivHex, 'hex'))
-  return Buffer.concat([decipher.update(Buffer.from(encHex, 'hex')), decipher.final()]).toString()
-}
+import { safeDecrypt } from '../lib/crypto'
 
 const RECIPIENT = 'vikas@fristinetech.com'
 let _counter = 1

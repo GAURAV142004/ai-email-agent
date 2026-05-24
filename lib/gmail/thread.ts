@@ -9,8 +9,8 @@ export interface EmailMessage {
 }
 
 export interface AttachmentMeta {
-  messageId:    string   // Gmail message ID that contains this attachment
-  attachmentId: string   // Gmail attachment ID — used to download content
+  messageId:    string
+  attachmentId: string
   filename:     string
   mimeType:     string
   sizeBytes:    number
@@ -29,7 +29,7 @@ export interface EmailThread {
 
 export interface FetchNewMessagesResult {
   threadIds:    string[]
-  newHistoryId: string | null   // latest cursor returned by Gmail — use this to advance last_history_id
+  newHistoryId: string | null
 }
 
 export async function fetchThread(
@@ -45,7 +45,7 @@ export async function fetchThread(
     format: 'full',
   })
 
-  const messages:    EmailMessage[]  = []
+  const messages:    EmailMessage[]   = []
   const attachments: AttachmentMeta[] = []
 
   for (const message of thread.data.messages ?? []) {
@@ -55,8 +55,6 @@ export async function fetchThread(
     const date    = headers.find((h) => h.name === 'Date')?.value ?? ''
     const body    = extractBody(message.payload)
     messages.push({ messageId: message.id ?? '', from, subject, body, date })
-
-    // Collect attachment metadata from this message (don't download yet)
     extractAttachmentMeta(message.id ?? '', message.payload, attachments)
   }
 
@@ -85,60 +83,85 @@ export async function fetchThread(
   }
 }
 
-/** Fetch thread IDs added since historyId. Also returns the new cursor to advance. */
+/**
+ * Fetch thread IDs added since historyId.
+ * Paginates through ALL history pages so no messages are silently dropped.
+ */
 export async function fetchNewMessages(
-  accessToken:  string,
-  historyId:    string,
+  accessToken:   string,
+  historyId:     string,
   refreshToken?: string,
 ): Promise<FetchNewMessagesResult> {
   const gmail = getGmailClient(accessToken, refreshToken)
 
-  const history = await gmail.users.history.list({
-    userId:         'me',
-    startHistoryId: historyId,
-    historyTypes:   ['messageAdded'],
-    labelId:        'INBOX',
-  })
+  const threadIds      = new Set<string>()
+  let   latestHistoryId: string | null = null
+  let   pageToken:       string | undefined
 
-  const threadIds = new Set<string>()
-  for (const record of history.data.history ?? []) {
-    for (const msg of record.messagesAdded ?? []) {
-      if (msg.message?.threadId) threadIds.add(msg.message.threadId)
+  do {
+    const history = await gmail.users.history.list({
+      userId:         'me',
+      startHistoryId: historyId,
+      historyTypes:   ['messageAdded'],
+      labelId:        'INBOX',
+      maxResults:     500,
+      ...(pageToken ? { pageToken } : {}),
+    })
+
+    for (const record of history.data.history ?? []) {
+      for (const msg of record.messagesAdded ?? []) {
+        if (msg.message?.threadId) threadIds.add(msg.message.threadId)
+      }
     }
-  }
+
+    if (history.data.historyId) latestHistoryId = history.data.historyId
+    pageToken = (history.data.nextPageToken as string | undefined)
+
+  } while (pageToken)
 
   return {
     threadIds:    Array.from(threadIds),
-    // historyId from the response = latest cursor; fall back to the input if API omits it
-    newHistoryId: history.data.historyId ?? null,
+    newHistoryId: latestHistoryId,
   }
 }
 
 /**
- * Bootstrap: fetch recent inbox message thread IDs directly via messages.list.
- * Used when no history cursor exists yet, or for a manual "backfill" sync.
+ * Bootstrap: fetch recent inbox thread IDs.
+ * Paginates through ALL pages so the full date range is covered regardless of volume.
+ * Gmail API returns at most 500 per page — we loop until nextPageToken is absent.
  */
 export async function fetchRecentThreadIds(
-  accessToken:  string,
-  daysBack:     number = 30,
+  accessToken:   string,
+  daysBack:      number = 30,
   refreshToken?: string,
-  maxResults:   number = 100,
+  maxResults:    number = 500,
 ): Promise<string[]> {
-  const gmail    = getGmailClient(accessToken, refreshToken)
+  const gmail      = getGmailClient(accessToken, refreshToken)
   const afterEpoch = Math.floor((Date.now() - daysBack * 24 * 60 * 60 * 1000) / 1000)
 
-  const res = await gmail.users.messages.list({
-    userId:     'me',
-    q:          `in:inbox after:${afterEpoch}`,
-    maxResults,
-  })
-
   const threadIds = new Set<string>()
-  for (const msg of res.data.messages ?? []) {
-    if (msg.threadId) threadIds.add(msg.threadId)
-  }
+  let   pageToken: string | undefined
 
-  return Array.from(threadIds)
+  do {
+    const res = await gmail.users.messages.list({
+      userId:     'me',
+      q:          `in:inbox after:${afterEpoch}`,
+      maxResults: 500,           // Gmail API max per page
+      ...(pageToken ? { pageToken } : {}),
+    })
+
+    for (const msg of res.data.messages ?? []) {
+      if (msg.threadId) threadIds.add(msg.threadId)
+    }
+
+    pageToken = (res.data.nextPageToken as string | undefined)
+
+    // Stop early if caller-specified cap reached
+    if (threadIds.size >= maxResults) break
+
+  } while (pageToken)
+
+  return Array.from(threadIds).slice(0, maxResults)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -157,10 +180,6 @@ function extractBody(payload: any): string {
   return ''
 }
 
-/**
- * Recursively walks a message payload tree to find attachment parts.
- * A part is an attachment when it has a filename and a non-empty attachmentId.
- */
 function extractAttachmentMeta(
   messageId: string,
   payload:   any,

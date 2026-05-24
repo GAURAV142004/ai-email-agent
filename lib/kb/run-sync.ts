@@ -4,6 +4,7 @@ import { fetchThread, fetchNewMessages, fetchRecentThreadIds } from '@/lib/gmail
 import { analyzeEmailThread } from '@/lib/ai/analyze'
 import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
 import { safeDecrypt } from '@/lib/crypto'
+import { getGmailClient } from '@/lib/gmail/client'
 import type { EmailClassificationRule } from '@/lib/supabase/types'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -18,22 +19,22 @@ function extractFromName(from: string): string {
 }
 
 export interface SyncProgressUpdate {
-  type:              'member_start' | 'thread' | 'member_done' | 'done'
-  memberEmail?:      string
-  totalThreads?:     number       // set on member_start
-  threadsProcessed?: number       // increments on each thread
-  kbIndexed?:        number
+  type:               'member_start' | 'thread' | 'member_done' | 'done'
+  memberEmail?:       string
+  totalThreads?:      number
+  threadsProcessed?:  number
+  kbIndexed?:         number
   attachmentsIndexed?: number
-  personalAdded?:    number
-  skipped?:          number
-  errorsCount?:      number
+  personalAdded?:     number
+  skipped?:           number
+  errorsCount?:       number
 }
 
 export interface SyncParams {
-  bootstrap?: boolean
-  daysBack?:  number
+  bootstrap?:           boolean
+  daysBack?:            number
   maxThreadsPerMember?: number
-  onProgress?: (update: SyncProgressUpdate) => void
+  onProgress?:          (update: SyncProgressUpdate) => void
 }
 
 export interface SyncResult {
@@ -49,9 +50,11 @@ export interface SyncResult {
 
 export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
   const {
-    bootstrap = false,
-    daysBack  = 30,
-    maxThreadsPerMember = bootstrap ? 500 : 200,
+    bootstrap           = false,
+    daysBack            = 30,
+    // Bootstrap default: 2000 (pagination handles the real cap)
+    // Incremental default: 1000 (covers high-volume days)
+    maxThreadsPerMember = bootstrap ? 2000 : 1000,
     onProgress,
   } = params
 
@@ -85,7 +88,7 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
   let totalSkipped         = 0
   let totalPersonalAdded   = 0
   let membersProcessed     = 0
-  const allErrors: string[]  = []
+  const allErrors: string[] = []
 
   for (const member of members) {
     const { data: tokenRow } = await supabase
@@ -112,14 +115,15 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
     const errors: string[] = []
 
     try {
-      let threadIds: string[]
+      let threadIds:    string[]
       let newHistoryId: string | null = null
 
       if (bootstrap || !member.last_history_id) {
         threadIds = await fetchRecentThreadIds(accessToken, daysBack, refreshToken, maxThreadsPerMember)
       } else {
         const result = await fetchNewMessages(accessToken, member.last_history_id, refreshToken)
-        threadIds    = result.threadIds.slice(0, maxThreadsPerMember)
+        // No arbitrary cap — process everything returned by the history API
+        threadIds    = result.threadIds
         newHistoryId = result.newHistoryId
       }
 
@@ -136,7 +140,7 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
           const fromName   = extractFromName(rawFrom)
           const firstMsgId = thread.messages[0]?.messageId ?? ''
 
-          // PATH A: KB indexing (email body + attachments)
+          // PATH A: KB indexing
           try {
             const kbResult = await indexEmailToKB(supabase, classificationRules, {
               memberId:       member.id,
@@ -199,16 +203,15 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
 
           emailsProcessed++
 
-          // Emit per-thread progress so the client can update its live counter
           emit({
-            type:              'thread',
-            memberEmail:       member.email,
-            threadsProcessed:  emailsProcessed,
-            totalThreads:      threadIds.length,
-            kbIndexed:         kbEntriesAdded,
+            type:             'thread',
+            memberEmail:      member.email,
+            threadsProcessed: emailsProcessed,
+            totalThreads:     threadIds.length,
+            kbIndexed:        kbEntriesAdded,
             personalAdded,
-            skipped:           emailsSkipped,
-            errorsCount:       errors.length,
+            skipped:          emailsSkipped,
+            errorsCount:      errors.length,
           })
 
           await sleep(200)
@@ -218,21 +221,44 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
         }
       }
 
+      // Advance history cursor
       if (!bootstrap && newHistoryId) {
         await supabase
           .from('team_members')
           .update({ last_history_id: newHistoryId })
           .eq('id', member.id)
       }
+
+      // After bootstrap, record the current historyId so the next incremental
+      // sync knows exactly where to start — without this, the first daily sync
+      // after a bootstrap would re-process everything.
+      if (bootstrap) {
+        try {
+          const gmail   = getGmailClient(accessToken, refreshToken)
+          const profile = await gmail.users.getProfile({ userId: 'me' })
+          if (profile.data.historyId) {
+            await supabase
+              .from('team_members')
+              .update({ last_history_id: profile.data.historyId })
+              .eq('id', member.id)
+          }
+        } catch {
+          // Non-critical — worst case next sync will re-run as bootstrap
+        }
+      }
+
     } catch (err: any) {
       errors.push(`Member sync failed: ${err?.message ?? 'unknown'}`)
     }
 
     if (syncJob?.id) {
+      // Mark as failed if: zero emails processed, OR more than half of processed threads errored
+      const highErrorRate = emailsProcessed > 0 && errors.length > emailsProcessed * 0.5
+      const totalFailure  = emailsProcessed === 0 && errors.length > 0
       await supabase
         .from('kb_sync_jobs')
         .update({
-          status:           errors.length && emailsProcessed === 0 ? 'failed' : 'completed',
+          status:           (totalFailure || highErrorRate) ? 'failed' : 'completed',
           emails_processed: emailsProcessed,
           emails_skipped:   emailsSkipped,
           kb_entries_added: kbEntriesAdded,

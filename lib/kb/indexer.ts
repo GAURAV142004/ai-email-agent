@@ -130,16 +130,20 @@ export async function indexEmailToKB(
 
   // Index any attachments found in this email thread
   if (params.attachments?.length && params.accessToken) {
-    await indexAttachments(
-      supabase,
-      entry.id,
-      params.memberId,
-      params.gmailThreadId,
-      params.emailDate,
-      params.attachments,
-      params.accessToken,
-      params.refreshToken,
-    )
+    try {
+      await indexAttachments(
+        supabase,
+        entry.id,
+        params.memberId,
+        params.gmailThreadId,
+        params.emailDate,
+        params.attachments,
+        params.accessToken,
+        params.refreshToken,
+      )
+    } catch {
+      // Attachment indexing failure is non-critical — email KB entry is already saved
+    }
   }
 
   return { indexed: true, reason: 'Indexed successfully', kbEntryId: entry.id }

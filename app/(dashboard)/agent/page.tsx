@@ -208,32 +208,14 @@ export default function AgentPage() {
   }, [status, router])
 
   useEffect(() => {
-    if (session) fetchConversations()
+    if (session) fetchConversations({ autoLoadFirst: true })
   }, [session]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Auto-restore the most recent conversation when the sidebar first loads
-  useEffect(() => {
-    if (conversations.length > 0 && !currentConvId) {
-      loadConversation(conversations[0].id)
-    }
-  }, [conversations]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, generating])
 
-  const fetchConversations = useCallback(async () => {
-    setConvsLoading(true)
-    try {
-      const res = await fetch('/api/agent/conversations')
-      const data = await res.json()
-      setConversations(data.conversations ?? [])
-    } finally {
-      setConvsLoading(false)
-    }
-  }, [])
-
-  async function loadConversation(id: string) {
+  const loadConversation = useCallback(async (id: string) => {
     setCurrentConvId(id)
     setMsgsLoading(true)
     setMessages([])
@@ -244,7 +226,23 @@ export default function AgentPage() {
     } finally {
       setMsgsLoading(false)
     }
-  }
+  }, [])
+
+  const fetchConversations = useCallback(async ({ autoLoadFirst = false }: { autoLoadFirst?: boolean } = {}) => {
+    setConvsLoading(true)
+    try {
+      const res  = await fetch('/api/agent/conversations')
+      const data = await res.json()
+      const convs: AgentConversation[] = data.conversations ?? []
+      setConversations(convs)
+      // On initial page load, restore the most recent conversation automatically
+      if (autoLoadFirst && convs.length > 0) {
+        loadConversation(convs[0].id)
+      }
+    } finally {
+      setConvsLoading(false)
+    }
+  }, [loadConversation])
 
   function startNewConversation() {
     setCurrentConvId(null)

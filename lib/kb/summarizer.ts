@@ -50,17 +50,19 @@ Thread content:
 ${masked.masked}
 
 Rules:
-- Focus ONLY on project/work content
-- Never include personal information
-- Extract concrete action items with owner hints if mentioned
-- Identify the project name if you can from context
+- Focus ONLY on project/work content. Never include personal information.
+- key_points: specific facts, decisions, numbers, dates — not generic phrases.
+- action_items: ONLY tasks where a specific person or team is explicitly asked to DO something.
+  DO NOT create action items for general questions, status updates, or information-sharing emails.
+  Each action item must have a clear task verb (fix, update, submit, review, deploy, etc.).
+- detected_project: infer from context (client name, project name, system name).
 
-Respond with JSON:
+Respond with JSON only:
 {
-  "summary": "2-3 sentence overview of what this email thread is about",
-  "key_points": ["point 1", "point 2", "point 3"],
+  "summary": "1-2 sentences stating exactly what happened or was decided",
+  "key_points": ["specific fact or decision 1", "specific fact or decision 2"],
   "action_items": [
-    { "task": "action description", "owner_hint": "person name or null", "due_date_hint": "YYYY-MM-DD or null" }
+    { "task": "specific task with verb", "owner_hint": "person or team name or null", "due_date_hint": "YYYY-MM-DD or null" }
   ],
   "detected_project": "project name or null",
   "participant_domains": ["domain1.com", "domain2.com"]

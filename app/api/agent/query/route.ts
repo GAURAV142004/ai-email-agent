@@ -4,6 +4,7 @@ import { searchKB, searchAttachments }             from '@/lib/kb/search'
 import { checkKBAccess, checkResponseSafety }      from '@/lib/compliance/access-guard'
 import { logKBQuery }                              from '@/lib/compliance/audit-logger'
 import { checkRateLimit }                          from '@/lib/rate-limit'
+import { VISIBILITY_MAP }                          from '@/lib/roles'
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
 import type { SupabaseClient }                     from '@supabase/supabase-js'
 import type { KBSearchResult, AttachmentSearchResult } from '@/lib/supabase/types'
@@ -33,18 +34,39 @@ async function fetchHistory(supabase: SupabaseClient, convId: string): Promise<H
   )
 }
 
+// ── Semantic intent expansion ─────────────────────────────────────────────────
+// Expands work-related keywords so the embedding search finds related entries
+// that use different wording (e.g. "CRITICAL" instead of "blocker").
+const INTENT_EXPANSIONS: Array<[RegExp, string]> = [
+  [/\b(blocker|blocking|blocked|stuck)\b/i,       'blocker critical urgent problem halted unable'],
+  [/\b(risk|risky|concern|warning)\b/i,            'risk concern warning danger mitigation challenge'],
+  [/\b(issue|problem|bug|defect|error)\b/i,        'issue problem defect error failure critical'],
+  [/\b(status|progress|update|how.{0,10}going)\b/i, 'status progress update milestone current state'],
+  [/\b(deadline|go.live|launch|delivery|due)\b/i,  'deadline go-live launch delivery date target approval'],
+  [/\b(action item|pending|outstanding|todo)\b/i,  'action item pending outstanding task owner due date'],
+  [/\b(decision|decided|agreed|approved)\b/i,      'decision decided agreed approved confirmed sign-off'],
+]
+
+function expandQueryIntent(q: string): string {
+  for (const [pattern, expansion] of INTENT_EXPANSIONS) {
+    if (pattern.test(q)) return `${q} ${expansion}`
+  }
+  return q
+}
+
 // ── Enriched search query for short/vague follow-ups ─────────────────────────
 // When the query is short ("who owns it?", "and the deadline?"), we append
 // the last exchange so the embedding search finds the right project context.
 function buildSearchQuery(question: string, history: HistoryMsg[]): string {
+  let q = expandQueryIntent(question)
   const wordCount = question.trim().split(/\s+/).length
   if (wordCount <= 6 && history.length >= 2) {
     const lastUser = [...history].reverse().find(m => m.role === 'user')
     const lastBot  = [...history].reverse().find(m => m.role === 'assistant')
-    return [question, lastUser?.content?.slice(0, 150), lastBot?.content?.slice(0, 200)]
+    q = [q, lastUser?.content?.slice(0, 150), lastBot?.content?.slice(0, 200)]
       .filter(Boolean).join(' ')
   }
-  return question
+  return q
 }
 
 // ── Ambiguity detection ───────────────────────────────────────────────────────
@@ -293,17 +315,39 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const maxSimilarity = allSimilarity.length > 0 ? Math.max(...allSimilarity) : 0
 
   // Build signals for the AI
-  const uniqueProjects = [...new Set(
+  const uniqueProjects  = [...new Set(
     emailResults.map(r => r.entry.detected_project).filter((p): p is string => !!p),
   )]
-  const queryIsVague   = hasVagueReference(question)
+  const queryIsVague    = hasVagueReference(question)
   const contextResolved = historyResolvesContext(history)
-  const isAmbiguous    = queryIsVague && !contextResolved && uniqueProjects.length >= 2
+
+  // For vague queries with no history context, check KB-wide project diversity —
+  // the vector search may have returned only 1 project even though multiple exist,
+  // simply because one project's content is semantically closer to the query.
+  let kbProjectNames = uniqueProjects
+  if (queryIsVague && !contextResolved) {
+    const visibleRoles = VISIBILITY_MAP[member.role as TeamRole]
+    const { data: visMembers } = await supabase
+      .from('team_members').select('id').in('role', visibleRoles).eq('is_active', true)
+    const visIds = (visMembers ?? []).map((m: { id: string }) => m.id)
+    if (visIds.length > 0) {
+      const { data: kbRows } = await supabase
+        .from('email_knowledge_base')
+        .select('detected_project')
+        .in('owner_member_id', visIds)
+        .not('detected_project', 'is', null)
+      kbProjectNames = [...new Set(
+        (kbRows ?? []).map((r: { detected_project: string }) => r.detected_project).filter(Boolean)
+      )] as string[]
+    }
+  }
+
+  const isAmbiguous    = queryIsVague && !contextResolved && kbProjectNames.length >= 2
   const isLowConfidence = totalSources > 0 && maxSimilarity < 0.38
 
   const signals: QuerySignals = {
     isAmbiguous,
-    ambiguousProjects: uniqueProjects,
+    ambiguousProjects: kbProjectNames.slice(0, 5),   // cap at 5 to keep AI prompt concise
     isLowConfidence,
     maxSimilarity,
     requestsFile,

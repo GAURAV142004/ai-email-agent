@@ -243,7 +243,32 @@ export interface ClassificationResult {
 }
 
 export interface KBSearchResult {
-  entry: EmailKnowledgeBase
+  entry:      EmailKnowledgeBase
+  similarity: number
+  memberName: string
+  memberRole: TeamRole
+}
+
+export interface EmailAttachmentKB {
+  id:               string
+  kb_entry_id:      string | null
+  owner_member_id:  string
+  gmail_message_id: string
+  gmail_thread_id:  string
+  filename:         string
+  mime_type:        string | null
+  file_size_bytes:  number | null
+  extracted_text:   string | null
+  summary:          string | null
+  key_points:       string[]
+  email_date:       string | null
+  pii_was_masked:   boolean
+  tokens_used:      number | null
+  created_at:       string
+}
+
+export interface AttachmentSearchResult {
+  attachment: EmailAttachmentKB
   similarity: number
   memberName: string
   memberRole: TeamRole

@@ -1,21 +1,27 @@
-import { SupabaseClient } from '@supabase/supabase-js'
-import { classifyEmail } from '@/lib/classification'
-import { summarizeForKB } from './summarizer'
+import { SupabaseClient }                         from '@supabase/supabase-js'
+import { classifyEmail }                          from '@/lib/classification'
+import { summarizeForKB }                         from './summarizer'
 import { generateEmbedding, buildEmbeddingText, formatVectorLiteral } from './embeddings'
-import { EmailClassificationRule } from '@/lib/supabase/types'
-import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
+import { EmailClassificationRule }                from '@/lib/supabase/types'
+import { shouldSkipAIAnalysis }                   from '@/lib/ai/pre-filter'
+import { AttachmentMeta }                         from '@/lib/gmail/thread'
+import { indexAttachments }                       from '@/lib/attachments/indexer'
 
 export interface IndexEmailParams {
-  memberId: string
-  gmailThreadId: string
+  memberId:       string
+  gmailThreadId:  string
   gmailMessageId: string
-  fromEmail: string
-  toEmail: string
-  subject: string
-  threadText: string   // full concatenated thread text
-  snippet: string      // first 500 chars
-  emailDate: string    // ISO string
-  direction: 'inbound' | 'outbound' | 'thread'
+  fromEmail:      string
+  toEmail:        string
+  subject:        string
+  threadText:     string    // full concatenated thread text
+  snippet:        string    // first 500 chars
+  emailDate:      string    // ISO string
+  direction:      'inbound' | 'outbound' | 'thread'
+  // Optional — when provided, attachments are indexed alongside the email
+  attachments?:   AttachmentMeta[]
+  accessToken?:   string
+  refreshToken?:  string
 }
 
 export interface IndexResult {
@@ -119,6 +125,20 @@ export async function indexEmailToKB(
 
   if (error || !entry) {
     return { indexed: false, reason: `DB insert failed: ${error?.message}` }
+  }
+
+  // Index any attachments found in this email thread
+  if (params.attachments?.length && params.accessToken) {
+    await indexAttachments(
+      supabase,
+      entry.id,
+      params.memberId,
+      params.gmailThreadId,
+      params.emailDate,
+      params.attachments,
+      params.accessToken,
+      params.refreshToken,
+    )
   }
 
   return { indexed: true, reason: 'Indexed successfully', kbEntryId: entry.id }

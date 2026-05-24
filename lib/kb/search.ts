@@ -1,7 +1,7 @@
-import { SupabaseClient } from '@supabase/supabase-js'
-import { generateEmbedding, formatVectorLiteral } from './embeddings'
-import { KBSearchResult, TeamRole } from '@/lib/supabase/types'
-import { VISIBILITY_MAP } from '@/lib/roles'
+import { SupabaseClient }                          from '@supabase/supabase-js'
+import { generateEmbedding, formatVectorLiteral }  from './embeddings'
+import { KBSearchResult, AttachmentSearchResult, TeamRole } from '@/lib/supabase/types'
+import { VISIBILITY_MAP }                          from '@/lib/roles'
 
 export interface KBSearchParams {
   query: string
@@ -79,6 +79,59 @@ export async function searchKB(
       memberName: memberMap.get(entry.owner_member_id)?.name ?? 'Unknown',
       memberRole: memberMap.get(entry.owner_member_id)?.role ?? 'developer',
     })) as KBSearchResult[]
+}
+
+/**
+ * Searches email_attachments_kb using the same visibility rules as searchKB.
+ * Returns attachment entries ranked by semantic similarity to the query.
+ */
+export async function searchAttachments(
+  supabase: SupabaseClient,
+  params:   KBSearchParams,
+): Promise<AttachmentSearchResult[]> {
+  const limit = params.limit ?? 10
+
+  const queryEmbedding = await generateEmbedding(params.query)
+  const vectorLiteral  = formatVectorLiteral(queryEmbedding)
+
+  const visibleRoles = VISIBILITY_MAP[params.viewerRole]
+
+  let memberQuery = supabase
+    .from('team_members')
+    .select('id, name, role')
+    .in('role', visibleRoles)
+    .eq('is_active', true)
+
+  if (params.memberIds?.length) {
+    memberQuery = memberQuery.in('id', params.memberIds)
+  }
+
+  const { data: visibleMembers } = await memberQuery
+  if (!visibleMembers?.length) return []
+
+  const visibleMemberIds = visibleMembers.map(m => m.id)
+
+  const { data: entries, error } = await supabase.rpc('search_attachments_by_embedding', {
+    query_embedding: vectorLiteral,
+    match_threshold: 0.3,
+    match_count:     limit * 2,
+    member_ids:      visibleMemberIds,
+    date_from:       params.dateFrom ?? null,
+    date_to:         params.dateTo   ?? null,
+  })
+
+  if (error || !entries) return []
+
+  const memberMap = new Map(visibleMembers.map(m => [m.id, m]))
+
+  return (entries as any[])
+    .slice(0, limit)
+    .map(att => ({
+      attachment: att,
+      similarity: att.similarity ?? 0,
+      memberName: memberMap.get(att.owner_member_id)?.name ?? 'Unknown',
+      memberRole: memberMap.get(att.owner_member_id)?.role ?? 'developer',
+    })) as AttachmentSearchResult[]
 }
 
 async function keywordFallback(

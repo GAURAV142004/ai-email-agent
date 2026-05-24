@@ -1,11 +1,12 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { getConsentedMember, getServiceSupabase } from '@/lib/auth'
-import { searchKB } from '@/lib/kb/search'
-import { checkKBAccess, checkResponseSafety } from '@/lib/compliance/access-guard'
-import { logKBQuery } from '@/lib/compliance/audit-logger'
-import { checkRateLimit } from '@/lib/rate-limit'
+import { NextRequest, NextResponse }               from 'next/server'
+import { getConsentedMember, getServiceSupabase }  from '@/lib/auth'
+import { searchKB, searchAttachments }             from '@/lib/kb/search'
+import { checkKBAccess, checkResponseSafety }      from '@/lib/compliance/access-guard'
+import { logKBQuery }                              from '@/lib/compliance/audit-logger'
+import { checkRateLimit }                          from '@/lib/rate-limit'
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
-import type { TeamRole } from '@/lib/roles'
+import type { KBSearchResult, AttachmentSearchResult } from '@/lib/supabase/types'
+import type { TeamRole }                           from '@/lib/roles'
 
 const bedrock = new BedrockRuntimeClient({
   region: process.env.AWS_REGION ?? 'ap-south-1',
@@ -16,30 +17,55 @@ const bedrock = new BedrockRuntimeClient({
 })
 const MODEL_ID = process.env.BEDROCK_MODEL_ID ?? 'amazon.nova-lite-v1:0'
 
-async function synthesizeAnswer(question: string, results: any[]): Promise<{ text: string; tokensUsed: number }> {
-  const ctx = results.map((r, i) => {
+async function synthesizeAnswer(
+  question:           string,
+  emailResults:       KBSearchResult[],
+  attachmentResults:  AttachmentSearchResult[],
+): Promise<{ text: string; tokensUsed: number }> {
+  // Build context from email KB entries
+  const emailCtx = emailResults.map((r, i) => {
     const e = r.entry
     return [
-      `[Entry ${i + 1}]`,
+      `[Email ${i + 1}]`,
       `Member: ${r.memberName} (${r.memberRole})`,
       `Project: ${e.detected_project ?? 'Unknown'}`,
       `Date: ${e.email_date ? new Date(e.email_date).toLocaleDateString() : 'Unknown'}`,
       `Summary: ${e.summary}`,
-      e.key_points?.length ? `Key Points: ${e.key_points.join(' | ')}` : null,
-      e.action_items?.length ? `Action Items: ${e.action_items.map((a: any) => a.task).join(' | ')}` : null,
+      e.key_points?.length      ? `Key Points: ${e.key_points.join(' | ')}`                       : null,
+      e.action_items?.length    ? `Action Items: ${(e.action_items as any[]).map((a: any) => a.task).join(' | ')}` : null,
     ].filter(Boolean).join('\n')
   }).join('\n\n---\n\n')
 
+  // Build context from attachment KB entries
+  const attachCtx = attachmentResults.map((r, i) => {
+    const a = r.attachment
+    return [
+      `[Document ${i + 1}]`,
+      `File: ${a.filename}`,
+      `Shared by: ${r.memberName} (${r.memberRole})`,
+      `Date: ${a.email_date ? new Date(a.email_date).toLocaleDateString() : 'Unknown'}`,
+      `Summary: ${a.summary ?? 'No summary available'}`,
+      a.key_points?.length ? `Key Points: ${a.key_points.join(' | ')}` : null,
+    ].filter(Boolean).join('\n')
+  }).join('\n\n---\n\n')
+
+  const totalSources = emailResults.length + attachmentResults.length
+  const ctx = [
+    emailCtx    ? `=== EMAIL SUMMARIES ===\n${emailCtx}`       : null,
+    attachCtx   ? `=== DOCUMENT ATTACHMENTS ===\n${attachCtx}` : null,
+  ].filter(Boolean).join('\n\n')
+
   const system = `You are an intelligent project knowledge assistant for a software delivery team.
-Answer questions based ONLY on the provided KB entries from team email summaries.
+Answer questions based ONLY on the provided KB entries from team email summaries and shared documents.
 Rules:
-- Cite which team members and projects you are drawing from
+- Cite which team members, projects, or documents you are drawing from
+- When referencing a document, mention its filename and the date it was shared
 - If information is not in the KB, clearly say so
 - Never speculate about personal matters, health, finances, or relationships
 - Structure long answers with clear headings
 - For timelines use chronological order; for action items use bullet lists`
 
-  const user = `Question: ${question}\n\nKB Entries (${results.length} relevant):\n${ctx}\n\nProvide a clear structured answer.`
+  const user = `Question: ${question}\n\nKnowledge Base (${totalSources} relevant sources):\n${ctx}\n\nProvide a clear structured answer.`
 
   const body = JSON.stringify({
     messages: [{ role: 'user', content: [{ text: user }] }],
@@ -96,28 +122,42 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ answer: safeBlockMsg, wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0 })
   }
 
-  // ── KB search ───────────────────────────────────────────────────────────────
-  const results = await searchKB(supabase, {
+  // ── KB search — emails + attachments in parallel ────────────────────────────
+  const searchParams = {
     query: question, viewerRole: member.role, viewerMemberId: member.id,
-    memberIds: mentioned ? [mentioned.id] : undefined, limit: 15,
-  })
+    memberIds: mentioned ? [mentioned.id] : undefined,
+  }
 
-  if (results.length === 0) {
-    const noInfo = 'No relevant project information was found in the knowledge base for your query. The knowledge base may not have been synced recently, or this topic has not appeared in indexed emails.'
+  const [emailResults, attachmentResults] = await Promise.all([
+    searchKB(supabase,          { ...searchParams, limit: 12 }),
+    searchAttachments(supabase, { ...searchParams, limit: 8  }),
+  ])
+
+  const totalSources = emailResults.length + attachmentResults.length
+
+  if (totalSources === 0) {
+    const noInfo = 'No relevant project information was found in the knowledge base for your query. The knowledge base may not have been synced recently, or this topic has not appeared in indexed emails or documents.'
     await logKBQuery(supabase, { queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id, wasBlocked: false, kbEntriesAccessed: 0 })
     return NextResponse.json({ answer: noInfo, wasBlocked: false, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0 })
   }
 
   // ── AI synthesis ────────────────────────────────────────────────────────────
   let synth: { text: string; tokensUsed: number }
-  try { synth = await synthesizeAnswer(question, results) }
-  catch { synth = { text: results.map(r => `• ${r.memberName}: ${r.entry.summary}`).join('\n'), tokensUsed: 0 } }
+  try {
+    synth = await synthesizeAnswer(question, emailResults, attachmentResults)
+  } catch {
+    const fallback = [
+      ...emailResults.map(r     => `• ${r.memberName}: ${r.entry.summary}`),
+      ...attachmentResults.map(r => `• [Doc] ${r.attachment.filename}: ${r.attachment.summary}`),
+    ].join('\n')
+    synth = { text: fallback, tokensUsed: 0 }
+  }
 
   // ── Post-response safety ────────────────────────────────────────────────────
   const safety      = checkResponseSafety(synth.text)
   const finalAnswer = safety.allowed ? synth.text : safety.blockReason!
   const respType    = detectResponseType(finalAnswer)
-  const clusters    = [...new Set(results.map(r => r.entry.detected_project).filter(Boolean) as string[])]
+  const clusters    = [...new Set(emailResults.map(r => r.entry.detected_project).filter(Boolean) as string[])]
 
   // ── Persist conversation ────────────────────────────────────────────────────
   let convId = conversationId
@@ -130,12 +170,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (convId) {
     await supabase.from('agent_messages').insert([
       { conversation_id: convId, role: 'user', content: question },
-      { conversation_id: convId, role: 'assistant', content: finalAnswer, kb_entries_referenced: results.length, project_clusters_referenced: clusters, response_type: respType, tokens_used: synth.tokensUsed, was_blocked: !safety.allowed, block_reason: safety.allowed ? null : safety.blockReason },
+      { conversation_id: convId, role: 'assistant', content: finalAnswer, kb_entries_referenced: totalSources, project_clusters_referenced: clusters, response_type: respType, tokens_used: synth.tokensUsed, was_blocked: !safety.allowed, block_reason: safety.allowed ? null : safety.blockReason },
     ])
   }
 
   // ── Audit log ───────────────────────────────────────────────────────────────
-  await logKBQuery(supabase, { queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id, wasBlocked: !safety.allowed, blockReason: safety.allowed ? undefined : (safety.blockReason ?? undefined), personalTopicsFound: safety.personalTopicsFound, kbEntriesAccessed: results.length, projectClustersHit: clusters, responseType: respType })
+  await logKBQuery(supabase, { queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id, wasBlocked: !safety.allowed, blockReason: safety.allowed ? undefined : (safety.blockReason ?? undefined), personalTopicsFound: safety.personalTopicsFound, kbEntriesAccessed: totalSources, projectClustersHit: clusters, responseType: respType })
 
-  return NextResponse.json({ answer: finalAnswer, wasBlocked: !safety.allowed, blockReason: safety.allowed ? undefined : safety.blockReason, responseType: respType, projectClusters: clusters, kbEntriesUsed: results.length, conversationId: convId, tokensUsed: synth.tokensUsed })
+  return NextResponse.json({ answer: finalAnswer, wasBlocked: !safety.allowed, blockReason: safety.allowed ? undefined : safety.blockReason, responseType: respType, projectClusters: clusters, kbEntriesUsed: totalSources, conversationId: convId, tokensUsed: synth.tokensUsed })
 }

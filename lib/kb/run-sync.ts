@@ -118,7 +118,7 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
           const fromName   = extractFromName(rawFrom)
           const firstMsgId = thread.messages[0]?.messageId ?? ''
 
-          // PATH A: KB indexing
+          // PATH A: KB indexing (email body + attachments)
           try {
             const kbResult = await indexEmailToKB(supabase, classificationRules, {
               memberId:       member.id,
@@ -131,6 +131,9 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
               snippet:        thread.fullText.slice(0, 500),
               emailDate:      thread.receivedAt,
               direction:      'inbound',
+              attachments:    thread.attachments,
+              accessToken,
+              refreshToken,
             })
             if (kbResult.indexed) kbEntriesAdded++
             else emailsSkipped++

@@ -8,14 +8,23 @@ export interface EmailMessage {
   date: string
 }
 
+export interface AttachmentMeta {
+  messageId:    string   // Gmail message ID that contains this attachment
+  attachmentId: string   // Gmail attachment ID — used to download content
+  filename:     string
+  mimeType:     string
+  sizeBytes:    number
+}
+
 export interface EmailThread {
-  threadId: string
-  subject: string
-  fromEmail: string
-  receivedAt: string
-  messages: EmailMessage[]
-  fullText: string
-  emailLink: string
+  threadId:    string
+  subject:     string
+  fromEmail:   string
+  receivedAt:  string
+  messages:    EmailMessage[]
+  fullText:    string
+  emailLink:   string
+  attachments: AttachmentMeta[]
 }
 
 export interface FetchNewMessagesResult {
@@ -36,7 +45,8 @@ export async function fetchThread(
     format: 'full',
   })
 
-  const messages: EmailMessage[] = []
+  const messages:    EmailMessage[]  = []
+  const attachments: AttachmentMeta[] = []
 
   for (const message of thread.data.messages ?? []) {
     const headers = message.payload?.headers ?? []
@@ -45,6 +55,9 @@ export async function fetchThread(
     const date    = headers.find((h) => h.name === 'Date')?.value ?? ''
     const body    = extractBody(message.payload)
     messages.push({ messageId: message.id ?? '', from, subject, body, date })
+
+    // Collect attachment metadata from this message (don't download yet)
+    extractAttachmentMeta(message.id ?? '', message.payload, attachments)
   }
 
   const firstMessage = messages[0]
@@ -67,7 +80,8 @@ export async function fetchThread(
     receivedAt,
     messages,
     fullText,
-    emailLink: `https://mail.google.com/mail/u/0/#inbox/${threadId}`,
+    emailLink:   `https://mail.google.com/mail/u/0/#inbox/${threadId}`,
+    attachments,
   }
 }
 
@@ -141,6 +155,35 @@ function extractBody(payload: any): string {
     }
   }
   return ''
+}
+
+/**
+ * Recursively walks a message payload tree to find attachment parts.
+ * A part is an attachment when it has a filename and a non-empty attachmentId.
+ */
+function extractAttachmentMeta(
+  messageId: string,
+  payload:   any,
+  results:   AttachmentMeta[],
+): void {
+  if (!payload) return
+
+  const attachmentId = payload.body?.attachmentId
+  const filename     = payload.filename
+
+  if (attachmentId && filename) {
+    results.push({
+      messageId,
+      attachmentId,
+      filename,
+      mimeType:  payload.mimeType ?? 'application/octet-stream',
+      sizeBytes: payload.body?.size ?? 0,
+    })
+  }
+
+  for (const part of payload.parts ?? []) {
+    extractAttachmentMeta(messageId, part, results)
+  }
 }
 
 function extractEmailAddress(from: string): string {

@@ -69,6 +69,59 @@ function buildSearchQuery(question: string, history: HistoryMsg[]): string {
   return q
 }
 
+// ── Aggregation query detection ───────────────────────────────────────────────
+// Queries that want information across ALL projects — "blockers", "action items",
+// "go-live dates", "risks". For these, vector search is unreliable because each
+// project may use different words for the same concept (e.g. "CRITICAL" vs "blocker").
+// We instead do a broad date-sorted fetch so every project is represented.
+const AGGREGATION_PATTERNS = [
+  /\b(blocker|blocking|blocked|stuck|halt)\b/i,
+  /\b(action item|pending|outstanding|open task|follow.?up)\b/i,
+  /\b(go.?live|deadline|launch date|delivery date|milestone|when.{0,10}due)\b/i,
+  /\b(risk|concern|critical|urgent|warning|escalat)\b/i,
+  /\b(status|progress|update).{0,20}\b(all|team|project|overall|across)\b/i,
+  /\b(summary|overview|recap).{0,20}\b(all|project|everything|team)\b/i,
+]
+
+function isAggregationQuery(q: string): boolean {
+  return AGGREGATION_PATTERNS.some(p => p.test(q))
+}
+
+// ── Broad KB scan ─────────────────────────────────────────────────────────────
+// Fetches recent entries across ALL visible projects without vector ranking.
+// Used when the query asks for information that spans multiple projects.
+async function broadScanKB(
+  supabase: SupabaseClient,
+  viewerRole: TeamRole,
+  limit: number,
+): Promise<KBSearchResult[]> {
+  const visibleRoles = VISIBILITY_MAP[viewerRole]
+  const { data: visMembers } = await supabase
+    .from('team_members')
+    .select('id, name, role')
+    .in('role', visibleRoles)
+    .eq('is_active', true)
+
+  if (!visMembers?.length) return []
+  const visIds = visMembers.map((m: { id: string }) => m.id)
+
+  const { data: entries } = await supabase
+    .from('email_knowledge_base')
+    .select('*')
+    .in('owner_member_id', visIds)
+    .order('email_date', { ascending: false })
+    .limit(limit)
+
+  const memberMap = new Map(visMembers.map((m: { id: string; name: string; role: string }) => [m.id, m]))
+
+  return (entries ?? []).map((entry: any) => ({
+    entry,
+    similarity: 0.75,
+    memberName: (memberMap.get(entry.owner_member_id) as any)?.name ?? 'Unknown',
+    memberRole: ((memberMap.get(entry.owner_member_id) as any)?.role ?? 'developer') as TeamRole,
+  }))
+}
+
 // ── Ambiguity detection ───────────────────────────────────────────────────────
 // Patterns where the user references "the client / the project / the issue"
 // without naming it — these are only ambiguous when history has no context
@@ -295,10 +348,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     })
   }
 
-  // History + enriched search query
-  const history     = conversationId ? await fetchHistory(supabase, conversationId) : []
-  const searchQuery = buildSearchQuery(question, history)
-  const requestsFile = !!(explicitFormat || wantsFile(question))
+  // History + intent signals (computed before search so they can influence strategy)
+  const history         = conversationId ? await fetchHistory(supabase, conversationId) : []
+  const searchQuery     = buildSearchQuery(question, history)
+  const requestsFile    = !!(explicitFormat || wantsFile(question))
+  const queryIsVague    = hasVagueReference(question)
+  const contextResolved = historyResolvesContext(history)
+
+  // Cross-project aggregation queries ("blockers", "action items", "go-live dates")
+  // bypass vector search and scan all recent KB entries so no project gets missed.
+  const wantsBroadScan = isAggregationQuery(question) && !contextResolved
 
   // KB search
   const searchParams = {
@@ -306,8 +365,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     memberIds: mentioned ? [mentioned.id] : undefined,
   }
   const [emailResults, attachmentResults] = await Promise.all([
-    searchKB(supabase,          { ...searchParams, limit: 12 }),
-    searchAttachments(supabase, { ...searchParams, limit: 8  }),
+    wantsBroadScan
+      ? broadScanKB(supabase, member.role as TeamRole, 18)
+      : searchKB(supabase, { ...searchParams, limit: 12 }),
+    searchAttachments(supabase, { ...searchParams, limit: 8 }),
   ])
 
   const totalSources  = emailResults.length + attachmentResults.length
@@ -318,11 +379,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const maxSimilarity = allSimilarity.length > 0 ? Math.max(...allSimilarity) : 0
 
   // Build signals for the AI
-  const uniqueProjects  = [...new Set(
+  const uniqueProjects = [...new Set(
     emailResults.map(r => r.entry.detected_project).filter((p): p is string => !!p),
   )]
-  const queryIsVague    = hasVagueReference(question)
-  const contextResolved = historyResolvesContext(history)
 
   // For vague queries with no history context, check KB-wide project diversity —
   // the vector search may have returned only 1 project even though multiple exist,

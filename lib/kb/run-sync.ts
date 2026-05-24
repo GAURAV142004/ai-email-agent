@@ -17,10 +17,23 @@ function extractFromName(from: string): string {
   return from.replace(/<.+?>/, '').trim().replace(/^"|"$/g, '') || ''
 }
 
+export interface SyncProgressUpdate {
+  type:              'member_start' | 'thread' | 'member_done' | 'done'
+  memberEmail?:      string
+  totalThreads?:     number       // set on member_start
+  threadsProcessed?: number       // increments on each thread
+  kbIndexed?:        number
+  attachmentsIndexed?: number
+  personalAdded?:    number
+  skipped?:          number
+  errorsCount?:      number
+}
+
 export interface SyncParams {
   bootstrap?: boolean
   daysBack?:  number
-  maxThreadsPerMember?: number // Hobby-plan safety valve
+  maxThreadsPerMember?: number
+  onProgress?: (update: SyncProgressUpdate) => void
 }
 
 export interface SyncResult {
@@ -39,7 +52,10 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
     bootstrap = false,
     daysBack  = 30,
     maxThreadsPerMember = bootstrap ? 500 : 200,
+    onProgress,
   } = params
+
+  const emit = (update: SyncProgressUpdate) => { try { onProgress?.(update) } catch {} }
 
   const supabase = getServiceSupabase()
 
@@ -106,6 +122,8 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
         threadIds    = result.threadIds.slice(0, maxThreadsPerMember)
         newHistoryId = result.newHistoryId
       }
+
+      emit({ type: 'member_start', memberEmail: member.email, totalThreads: threadIds.length })
 
       for (const threadId of threadIds) {
         try {
@@ -180,6 +198,19 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
           }
 
           emailsProcessed++
+
+          // Emit per-thread progress so the client can update its live counter
+          emit({
+            type:              'thread',
+            memberEmail:       member.email,
+            threadsProcessed:  emailsProcessed,
+            totalThreads:      threadIds.length,
+            kbIndexed:         kbEntriesAdded,
+            personalAdded,
+            skipped:           emailsSkipped,
+            errorsCount:       errors.length,
+          })
+
           await sleep(200)
         } catch (err: any) {
           errors.push(`Thread ${threadId}: ${err?.message ?? 'unknown error'}`)

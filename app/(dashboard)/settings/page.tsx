@@ -112,6 +112,18 @@ export default function SettingsPage() {
   const [kbSyncErrors, setKbSyncErrors] = useState<string[]>([])
   const [bootstrapDays, setBootstrapDays] = useState<number>(90)
 
+  // Live sync progress
+  type KBProgress = {
+    memberEmail: string
+    totalThreads: number
+    threadsProcessed: number
+    kbIndexed: number
+    personalAdded: number
+    skipped: number
+    errorsCount: number
+  }
+  const [kbProgress, setKbProgress] = useState<KBProgress | null>(null)
+
   // Consent state
   const [consentAt, setConsentAt] = useState<string | null>(null)
 
@@ -187,28 +199,79 @@ export default function SettingsPage() {
   async function handleKbSync(bootstrap = false) {
     setKbSyncing(true)
     setKbMsg(null)
+    setKbProgress(null)
     try {
       const url = bootstrap
         ? `/api/admin/trigger-kb-sync?bootstrap=true&days=${bootstrapDays}`
         : '/api/admin/trigger-kb-sync'
-      const res  = await fetch(url, { method: 'POST' })
-      const data = await res.json()
-      if (res.ok) {
-        const kb  = data.totalKBEntriesAdded ?? 0
-        const pi  = data.totalPersonalAdded  ?? 0
-        const tot = data.totalEmailsProcessed ?? 0
-        setKbMsg(
-          bootstrap
-            ? `Bootstrap done — ${tot} emails scanned, ${kb} added to KB, ${pi} to inbox.`
-            : `Sync done — ${kb} KB entries added, ${pi} inbox emails.`,
-        )
-        setLastKbSync(new Date().toISOString())
-        if (data.kbSync?.totalKBEntries != null) setKbEntryCount(data.kbSync.totalKBEntries)
-      } else {
+      const res = await fetch(url, { method: 'POST' })
+
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}))
         setKbMsg(data.error ?? 'KB sync failed.')
+        return
+      }
+
+      const reader  = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer    = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          try {
+            const update = JSON.parse(trimmed)
+
+            if (update.type === 'done') {
+              const kb  = update.totalKBEntriesAdded ?? 0
+              const pi  = update.totalPersonalAdded  ?? 0
+              const tot = update.totalEmailsProcessed ?? 0
+              setKbMsg(
+                bootstrap
+                  ? `Bootstrap done — ${tot} emails scanned, ${kb} added to KB, ${pi} to inbox.`
+                  : `Sync done — ${kb} KB entries added, ${pi} inbox emails.`,
+              )
+              setLastKbSync(new Date().toISOString())
+              setKbProgress(null)
+
+            } else if (update.type === 'member_start') {
+              setKbProgress({
+                memberEmail:      update.memberEmail      ?? '',
+                totalThreads:     update.totalThreads     ?? 0,
+                threadsProcessed: 0,
+                kbIndexed:        0,
+                personalAdded:    0,
+                skipped:          0,
+                errorsCount:      0,
+              })
+
+            } else if (update.type === 'thread') {
+              setKbProgress({
+                memberEmail:      update.memberEmail      ?? '',
+                totalThreads:     update.totalThreads     ?? 0,
+                threadsProcessed: update.threadsProcessed ?? 0,
+                kbIndexed:        update.kbIndexed        ?? 0,
+                personalAdded:    update.personalAdded    ?? 0,
+                skipped:          update.skipped          ?? 0,
+                errorsCount:      update.errorsCount      ?? 0,
+              })
+
+            } else if (update.type === 'error') {
+              setKbMsg(`Sync error: ${update.error}`)
+            }
+          } catch {}
+        }
       }
     } catch {
-      setKbMsg('Network error.')
+      setKbMsg('Connection lost — sync may still be running in the background.')
     } finally {
       setKbSyncing(false)
     }
@@ -426,6 +489,54 @@ export default function SettingsPage() {
                     {kbSyncing ? 'Running…' : `Bootstrap Last ${bootstrapDays} Days`}
                   </Button>
                 </div>
+
+                {/* Live progress */}
+                {kbSyncing && kbProgress && (
+                  <div className="rounded-xl border border-violet-100 dark:border-violet-900/50 bg-violet-50 dark:bg-violet-950/20 p-4 space-y-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-medium text-violet-700 dark:text-violet-300 flex items-center gap-1.5 min-w-0">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                        <span className="truncate">{kbProgress.memberEmail}</span>
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400 shrink-0 ml-3">
+                        {kbProgress.threadsProcessed} / {kbProgress.totalThreads}
+                      </span>
+                    </div>
+                    <div className="w-full bg-violet-100 dark:bg-violet-900/40 rounded-full h-1.5 overflow-hidden">
+                      <div
+                        className="bg-violet-600 h-1.5 rounded-full transition-all duration-200"
+                        style={{
+                          width: kbProgress.totalThreads > 0
+                            ? `${Math.round((kbProgress.threadsProcessed / kbProgress.totalThreads) * 100)}%`
+                            : '0%',
+                        }}
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                      <span className="text-slate-500 dark:text-slate-400">
+                        <strong className="text-violet-600 dark:text-violet-400">{kbProgress.kbIndexed}</strong> KB indexed
+                      </span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        <strong className="text-slate-700 dark:text-slate-300">{kbProgress.personalAdded}</strong> inbox
+                      </span>
+                      <span className="text-slate-400 dark:text-slate-500">
+                        {kbProgress.skipped} skipped
+                      </span>
+                      {kbProgress.errorsCount > 0 && (
+                        <span className="text-amber-600 dark:text-amber-400">
+                          <strong>{kbProgress.errorsCount}</strong> errors
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {kbSyncing && !kbProgress && (
+                  <div className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Fetching thread list…
+                  </div>
+                )}
+
                 <p className="text-xs text-slate-400 leading-relaxed">
                   <strong className="text-slate-500 dark:text-slate-400">Sync New Emails</strong> — processes emails received since last sync.<br />
                   <strong className="text-slate-500 dark:text-slate-400">Bootstrap</strong> — scans all threads in the selected window across every team member. Use a longer window for a richer KB. This may take several minutes.

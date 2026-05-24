@@ -201,6 +201,7 @@ export interface AgentConversation {
   id: string
   member_id: string
   title: string | null
+  project_focus: string | null
   created_at: string
   updated_at: string
 }

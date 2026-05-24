@@ -42,6 +42,7 @@ async function synthesizeAnswer(
   emailResults:       KBSearchResult[],
   attachmentResults:  AttachmentSearchResult[],
   history:            Array<{ role: 'user' | 'assistant'; content: string }>,
+  projectFocus:       string | null,
 ): Promise<{ text: string; tokensUsed: number }> {
   // Build KB context block
   const emailCtx = emailResults.map((r, i) => {
@@ -75,9 +76,14 @@ async function synthesizeAnswer(
     attachCtx ? `=== DOCUMENT ATTACHMENTS ===\n${attachCtx}` : null,
   ].filter(Boolean).join('\n\n')
 
+  const projectLine = projectFocus
+    ? `The user is specifically asking about: "${projectFocus}". Prioritise information related to this project/topic.`
+    : 'The user is asking a general question across all projects.'
+
   const system = `You are a project knowledge assistant for a software delivery team.
 You answer questions using ONLY the KB data provided. You have no other knowledge.
 When the user refers to something from earlier in the conversation, use the conversation history.
+${projectLine}
 
 RESPONSE RULES — follow strictly, no exceptions:
 1. Start with the direct answer. Never restate the question.
@@ -149,6 +155,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const body           = await request.json().catch(() => ({}))
   const question       = (body?.question ?? '').trim()
   const conversationId = body?.conversationId as string | undefined
+  const projectFocus   = (body?.projectFocus as string | undefined) ?? null
 
   if (!question) return NextResponse.json({ error: 'question is required' }, { status: 400 })
   if (question.length > 2000) return NextResponse.json({ error: 'Question too long (max 2000 chars)' }, { status: 400 })
@@ -199,7 +206,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // ── AI synthesis ──────────────────────────────────────────────────────────
   let synth: { text: string; tokensUsed: number }
   try {
-    synth = await synthesizeAnswer(question, emailResults, attachmentResults, history)
+    synth = await synthesizeAnswer(question, emailResults, attachmentResults, history, projectFocus)
   } catch {
     const fallback = [
       ...emailResults.map(r      => `• ${r.memberName}: ${r.entry.summary}`),
@@ -219,7 +226,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!convId) {
     const { data: conv } = await supabase
       .from('agent_conversations')
-      .insert({ member_id: member.id, title: question.slice(0, 60) })
+      .insert({
+        member_id:     member.id,
+        title:         projectFocus ? `[${projectFocus}] ${question.slice(0, 50)}` : question.slice(0, 60),
+        project_focus: projectFocus,
+      })
       .select('id')
       .single()
     convId = conv?.id
@@ -272,6 +283,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     projectClusters: clusters,
     kbEntriesUsed:   totalSources,
     conversationId:  convId,
+    projectFocus,
     messageId,
     tokensUsed:      synth.tokensUsed,
   })

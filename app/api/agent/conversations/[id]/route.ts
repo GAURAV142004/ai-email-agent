@@ -13,7 +13,7 @@ export async function GET(
 
   const { data: conv } = await supabase
     .from('agent_conversations')
-    .select('*')
+    .select('id, member_id, title, project_focus, created_at, updated_at')
     .eq('id', id)
     .single()
 
@@ -22,7 +22,7 @@ export async function GET(
 
   const { data: messages } = await supabase
     .from('agent_messages')
-    .select('*')
+    .select('id, conversation_id, role, content, kb_entries_referenced, project_clusters_referenced, response_type, document_filename, document_mime_type, tokens_used, was_blocked, block_reason, created_at')
     .eq('conversation_id', id)
     .order('created_at', { ascending: true })
 

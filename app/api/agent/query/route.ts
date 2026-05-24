@@ -85,13 +85,16 @@ function hasVagueReference(q: string): boolean {
   return VAGUE_REFS.some(p => p.test(q))
 }
 
-// Whether conversation history already resolves a vague reference
-// (checks if any specific project/client name appears in recent history)
+// Whether conversation history already resolves a vague reference.
+// Only checks the USER's own messages — the assistant's answers are full of proper
+// nouns (project names it just mentioned) which would falsely suppress disambiguation.
 function historyResolvesContext(history: HistoryMsg[]): boolean {
   if (history.length === 0) return false
-  const recent = history.slice(-4).map(m => m.content).join(' ')
-  // If the last few messages contain a capitalised word (likely a proper noun = client/project name)
-  return /\b[A-Z][a-z]{2,}\b/.test(recent)
+  const recentUserText = history.slice(-6)
+    .filter(m => m.role === 'user')
+    .map(m => m.content).join(' ')
+  // 5+ char capitalised word = likely a specific project / client name typed by the user
+  return /\b[A-Z][a-zA-Z]{4,}\b/.test(recentUserText)
 }
 
 // ── File export intent ────────────────────────────────────────────────────────

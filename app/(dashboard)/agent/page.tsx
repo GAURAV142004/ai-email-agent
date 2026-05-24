@@ -266,9 +266,10 @@ export default function AgentPage() {
     setShowFormatSelector(false)
     setPendingQuery(null)
 
-    // Optimistic user message
+    // Optimistic user message — replaced by real data after response
+    const tempId = 'temp-user-' + Date.now()
     const tempUserMsg: AgentMessage = {
-      id: 'temp-user-' + Date.now(),
+      id: tempId,
       conversation_id: currentConvId ?? '',
       role: 'user',
       content: query,
@@ -292,10 +293,19 @@ export default function AgentPage() {
       })
       const data = await res.json()
 
+      const resolvedConvId = data.conversationId ?? currentConvId ?? ''
+
       if (!currentConvId && data.conversationId) {
         setCurrentConvId(data.conversationId)
         fetchConversations()
       }
+
+      // Patch the temp user message with the resolved conversation ID
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === tempId ? { ...m, conversation_id: resolvedConvId } : m,
+        ),
+      )
 
       // If response is document-type, trigger document generation
       if ((data.responseType === 'document' || docFormat) && !data.wasBlocked) {
@@ -308,14 +318,14 @@ export default function AgentPage() {
               query,
               answer: data.answer,
               format,
-              conversation_id: data.conversationId,
+              conversation_id: resolvedConvId,
             }),
           })
           if (docRes.ok) {
             const docData = await docRes.json()
             const assistantMsg: AgentMessage = {
-              id: data.message_id ?? 'a-' + Date.now(),
-              conversation_id: data.conversation_id,
+              id: data.messageId ?? 'a-' + Date.now(),
+              conversation_id: resolvedConvId,
               role: 'assistant',
               content: data.answer,
               kb_entries_referenced: data.kbEntriesUsed ?? 0,
@@ -338,8 +348,8 @@ export default function AgentPage() {
       }
 
       const assistantMsg: AgentMessage = {
-        id: data.message_id ?? 'a-' + Date.now(),
-        conversation_id: data.conversationId ?? currentConvId ?? '',
+        id: data.messageId ?? 'a-' + Date.now(),
+        conversation_id: resolvedConvId,
         role: 'assistant',
         content: data.answer ?? data.blockReason ?? 'No response received.',
         kb_entries_referenced: data.kbEntriesUsed ?? 0,

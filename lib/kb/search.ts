@@ -36,7 +36,7 @@ async function keywordSearchKB(
   let q = supabase
     .from('email_knowledge_base')
     .select('*')
-    .in('owner_member_id', visibleMemberIds)
+    .or(`owner_member_id.in.(${visibleMemberIds.join(',')}),participant_member_ids.ov.{${visibleMemberIds.join(',')}}`)
     .textSearch('search_vector', cleanQuery, { type: 'plain', config: 'english' })
     .limit(limit)
 
@@ -140,11 +140,13 @@ export async function searchKB(
 
   // Both empty → try simple keyword fallback
   if (vectorResults.length === 0 && keywordEntries.length === 0) {
-    return keywordFallback(supabase, params, visibleMembers, limit)
+    const fallback = await keywordFallback(supabase, params, visibleMembers, limit)
+    return reRankResults(fallback, params.query)
   }
 
-  // Merge with RRF
-  return reciprocalRankFusion(vectorResults, keywordEntries, memberMap, limit)
+  // Merge with RRF and then apply local re-ranking based on query keyword density
+  const mergedResults = reciprocalRankFusion(vectorResults, keywordEntries, memberMap, limit)
+  return reRankResults(mergedResults, params.query)
 }
 
 // ─── Attachment search (vector only — no tsvector on attachments table yet) ──
@@ -208,7 +210,7 @@ async function keywordFallback(
   let query = supabase
     .from('email_knowledge_base')
     .select('*')
-    .in('owner_member_id', visibleMemberIds)
+    .or(`owner_member_id.in.(${visibleMemberIds.join(',')}),participant_member_ids.ov.{${visibleMemberIds.join(',')}}`)
     .or([
       `summary.ilike.%${q}%`,
       `detected_project.ilike.%${q}%`,
@@ -228,4 +230,44 @@ async function keywordFallback(
     memberName: (memberMap.get(entry.owner_member_id) as any)?.name ?? 'Unknown',
     memberRole: ((memberMap.get(entry.owner_member_id) as any)?.role ?? 'developer') as TeamRole,
   }))
+}
+
+/**
+ * Re-ranks search results based on query keyword density and project matches.
+ */
+export function reRankResults(
+  results: KBSearchResult[],
+  query:   string,
+): KBSearchResult[] {
+  if (!results.length) return []
+
+  const queryWords = query.toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(w => w.length > 2)
+
+  const reranked = results.map(r => {
+    let score = r.similarity // Base similarity from pgvector/RRF (0.0 - 1.0)
+    const summary = r.entry.summary.toLowerCase()
+    const project = (r.entry.detected_project ?? '').toLowerCase()
+
+    let matches = 0
+    for (const word of queryWords) {
+      if (summary.includes(word)) matches++
+      if (project.includes(word)) score += 0.05 // boost for project matches
+    }
+
+    const density = queryWords.length > 0 ? (matches / queryWords.length) : 0
+    score += density * 0.15 // up to 0.15 boost for keyword density
+
+    return {
+      ...r,
+      rerankScore: score,
+    }
+  })
+
+  return reranked
+    .sort((a, b) => (b.rerankScore ?? 0) - (a.rerankScore ?? 0))
+    .map(({ rerankScore, ...r }) => r)
 }

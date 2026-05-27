@@ -20,6 +20,7 @@ import {
   type ProjectCluster,
 } from '@/lib/kb/project-fetch'
 import { searchAttachments }                       from '@/lib/kb/search'
+import { getSemanticCache, setSemanticCache }       from '@/lib/kb/cache-service'
 
 const bedrock = new BedrockRuntimeClient({
   region: process.env.AWS_REGION ?? 'ap-south-1',
@@ -300,6 +301,72 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     })
   }
 
+  // ── Semantic Cache Check ───────────────────────────────────────────────────
+  const requestsFile  = !!(explicitFormat || wantsFile(question))
+  if (!requestsFile) {
+    const cached = await getSemanticCache(supabase, question)
+    if (cached) {
+      console.log(`[Semantic Cache] Hit for: "${question}"`)
+      
+      let convId = conversationId
+      if (!convId) {
+        const { data: conv } = await supabase
+          .from('agent_conversations')
+          .insert({ member_id: member.id, title: question.slice(0, 70) })
+          .select('id').single()
+        convId = conv?.id
+      } else {
+        await supabase.from('agent_conversations')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', convId).eq('member_id', member.id)
+      }
+
+      let messageId: string | undefined
+      if (convId) {
+        await supabase.from('agent_messages').insert({
+          conversation_id: convId, role: 'user', content: question,
+        })
+        const { data: aMsg } = await supabase.from('agent_messages')
+          .insert({
+            conversation_id:             convId,
+            role:                        'assistant',
+            content:                     cached.responseText,
+            kb_entries_referenced:       cached.kbEntriesReferenced,
+            project_clusters_referenced: cached.projectClustersReferenced,
+            response_type:               cached.responseType,
+            tokens_used:                 0,
+            was_blocked:                 false,
+          })
+          .select('id').single()
+        messageId = aMsg?.id
+      }
+
+      const availableClusters = await fetchAllProjectClusters(supabase, member.role as TeamRole, member.id)
+
+      await logKBQuery(supabase, {
+        queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id,
+        wasBlocked: false, kbEntriesAccessed: cached.kbEntriesReferenced,
+        projectClustersHit: cached.projectClustersReferenced, responseType: cached.responseType,
+      })
+
+      return NextResponse.json({
+        answer:               cached.responseText,
+        wasBlocked:           false,
+        responseType:         cached.responseType,
+        projectClusters:      cached.projectClustersReferenced,
+        projectClusterDetails: availableClusters.slice(0, 8).map(c => ({
+          id: c.id, name: c.name, entryCount: c.entryCount,
+        })),
+        kbEntriesUsed:        cached.kbEntriesReferenced,
+        kbStrategy:           'semantic_cache',
+        conversationId:       convId,
+        messageId,
+        tokensUsed:           0,
+        isClarifyingQuestion: false,
+      })
+    }
+  }
+
   // ── Load history + visible members + all project clusters ───────────────────
   const [history, { ids: memberIds, map: memberMap }, availableClusters] = await Promise.all([
     conversationId ? fetchHistory(supabase, conversationId) : Promise.resolve([] as HistoryMsg[]),
@@ -315,7 +382,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     })
   }
 
-  const requestsFile  = !!(explicitFormat || wantsFile(question))
   const isAggregation = isAggregationQuery(question)
   const isSpecific    = isSpecificQuery(question)
 
@@ -463,7 +529,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const { data: recentEntries } = await supabase
       .from('email_knowledge_base')
       .select('*')
-      .in('owner_member_id', memberIds)
+      .or(`owner_member_id.in.(${memberIds.join(',')}),participant_member_ids.ov.{${memberIds.join(',')}}`)
       .order('email_date', { ascending: false })
       .limit(20)
 
@@ -559,6 +625,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       })
       .select('id').single()
     messageId = aMsg?.id
+  }
+
+  // Save to semantic cache for future similar queries
+  if (safety.allowed && !requestsFile && strategy !== 'clarifying_question') {
+    await setSemanticCache(supabase, question, {
+      responseText:              finalAnswer,
+      responseType:              respType,
+      kbEntriesReferenced:       totalEntries,
+      projectClustersReferenced: projectNames
+    })
   }
 
   await logKBQuery(supabase, {

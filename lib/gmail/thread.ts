@@ -20,6 +20,8 @@ export interface EmailThread {
   threadId:    string
   subject:     string
   fromEmail:   string
+  toEmails:    string[]    // Primary recipients (To: header, first message)
+  ccEmails:    string[]    // CC recipients (Cc: header, first message)
   receivedAt:  string
   messages:    EmailMessage[]
   fullText:    string
@@ -47,8 +49,10 @@ export async function fetchThread(
 
   const messages:    EmailMessage[]   = []
   const attachments: AttachmentMeta[] = []
+  let   toEmails:   string[] = []
+  let   ccEmails:   string[] = []
 
-  for (const message of thread.data.messages ?? []) {
+  for (const [msgIndex, message] of (thread.data.messages ?? []).entries()) {
     const headers = message.payload?.headers ?? []
     const from    = headers.find((h) => h.name === 'From')?.value ?? ''
     const subject = headers.find((h) => h.name === 'Subject')?.value ?? '(no subject)'
@@ -56,6 +60,14 @@ export async function fetchThread(
     const body    = extractBody(message.payload)
     messages.push({ messageId: message.id ?? '', from, subject, body, date })
     extractAttachmentMeta(message.id ?? '', message.payload, attachments)
+
+    // Extract To/CC from the FIRST message only (thread originator)
+    if (msgIndex === 0) {
+      const toHeader = headers.find((h) => h.name === 'To')?.value ?? ''
+      const ccHeader = headers.find((h) => h.name === 'Cc')?.value ?? ''
+      toEmails = parseEmailList(toHeader)
+      ccEmails = parseEmailList(ccHeader)
+    }
   }
 
   const firstMessage = messages[0]
@@ -75,6 +87,8 @@ export async function fetchThread(
     threadId,
     subject,
     fromEmail,
+    toEmails,
+    ccEmails,
     receivedAt,
     messages,
     fullText,
@@ -208,4 +222,22 @@ function extractAttachmentMeta(
 function extractEmailAddress(from: string): string {
   const match = from.match(/<(.+?)>/)
   return match ? match[1] : from
+}
+
+/**
+ * Parses a comma-separated email header value into an array of lowercase
+ * email addresses. Handles both plain addresses and "Name <email>" format.
+ *
+ * Example input:  "Alice <alice@co.com>, bob@co.com"
+ * Example output: ["alice@co.com", "bob@co.com"]
+ */
+export function parseEmailList(header: string): string[] {
+  if (!header.trim()) return []
+  return header
+    .split(',')
+    .map(part => {
+      const match = part.match(/<([^>]+)>/)
+      return match ? match[1].toLowerCase().trim() : part.toLowerCase().trim()
+    })
+    .filter(addr => addr.includes('@'))   // must look like an email address
 }

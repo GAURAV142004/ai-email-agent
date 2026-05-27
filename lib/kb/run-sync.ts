@@ -160,6 +160,8 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
               gmailMessageId: firstMsgId,
               fromEmail,
               toEmail:        member.email,
+              toEmails:       thread.toEmails,   // NEW: full To header recipients
+              ccEmails:       thread.ccEmails,   // NEW: full CC header recipients
               subject:        thread.subject,
               threadText:     thread.fullText,
               snippet:        thread.fullText.slice(0, 500),
@@ -169,8 +171,9 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
               accessToken,
               refreshToken,
             })
-            if (kbResult.indexed) kbEntriesAdded++
-            else emailsSkipped++
+            if (kbResult.indexed)        kbEntriesAdded++
+            else if (kbResult.merged)    { /* thread merged to existing KB entry */ }
+            else                         emailsSkipped++
           } catch (kbErr: any) {
             errors.push(`KB ${threadId}: ${kbErr?.message ?? 'unknown'}`)
           }

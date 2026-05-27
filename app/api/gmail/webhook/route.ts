@@ -126,6 +126,8 @@ async function processWebhookDualPath(notification: PubSubMessage): Promise<void
           gmailMessageId: firstMsgId,
           fromEmail,
           toEmail:        member.email,
+          toEmails:       thread.toEmails,   // NEW
+          ccEmails:       thread.ccEmails,   // NEW
           subject:        thread.subject,
           threadText:     thread.fullText,
           snippet,

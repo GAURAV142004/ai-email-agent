@@ -236,7 +236,9 @@ export default function SettingsPage() {
               const tot = update.totalEmailsProcessed ?? 0
               setKbMsg(
                 bootstrap
-                  ? `Bootstrap done — ${tot} emails scanned, ${kb} added to KB, ${pi} to inbox.`
+                  ? (update.mode === 'queued_background'
+                    ? `Bootstrap queued: ${update.totalQueued} threads added to queue. Syncing in background...`
+                    : `Bootstrap done — ${tot} emails scanned, ${kb} added to KB, ${pi} to inbox.`)
                   : `Sync done — ${kb} KB entries added, ${pi} inbox emails.`,
               )
               setLastKbSync(new Date().toISOString())

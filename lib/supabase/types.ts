@@ -107,7 +107,24 @@ export interface KBActionItem {
   task: string
   owner_hint: string | null
   due_date_hint: string | null
+  priority?: 'high' | 'medium' | 'low'
 }
+
+export interface KBBlocker {
+  description: string
+  blocking_whom: string | null
+  needs_action_from: string | null
+}
+
+export type EmailType =
+  | 'action_request'
+  | 'status_update'
+  | 'blocker'
+  | 'decision'
+  | 'follow_up'
+  | 'information'
+  | 'meeting'
+  | 'other'
 
 export interface EmailKnowledgeBase {
   id: string
@@ -119,6 +136,17 @@ export interface EmailKnowledgeBase {
   key_points: string[]
   action_items: KBActionItem[]
   participant_domains: string[]
+  // ── New participant tracking (migration 015) ──
+  to_emails: string[]
+  cc_emails: string[]
+  participant_member_ids: string[]
+  mentioned_persons: string[]
+  // ── Structured extraction (migration 015) ──
+  email_type: EmailType
+  urgency: 'high' | 'medium' | 'low'
+  awaiting_response_from: string | null
+  decisions_made: string[]
+  // ─────────────────────────────────────────────
   direction: EmailDirection | null
   email_date: string | null
   classification_confidence: number | null
@@ -129,6 +157,75 @@ export interface EmailKnowledgeBase {
   tokens_used: number | null
   created_at: string
   updated_at: string
+}
+
+// ─── Structured extraction tables ────────────────────────────
+
+export type ActionItemStatus = 'open' | 'in_progress' | 'done' | 'deferred'
+export type BlockerStatus    = 'open' | 'resolved' | 'stale'
+export type FollowupStatus   = 'pending' | 'responded' | 'cancelled'
+
+export interface ProjectActionItem {
+  id: string
+  source_kb_entry_id: string | null
+  project_cluster_id: string | null
+  gmail_thread_id: string
+  task_description: string
+  owner_hint: string | null
+  assigned_member_id: string | null
+  due_date: string | null
+  status: ActionItemStatus
+  priority: 'high' | 'medium' | 'low'
+  source_date: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectBlocker {
+  id: string
+  source_kb_entry_id: string | null
+  project_cluster_id: string | null
+  gmail_thread_id: string
+  description: string
+  blocking_whom: string | null
+  needs_action_from: string | null
+  action_member_id: string | null
+  status: BlockerStatus
+  raised_at: string | null
+  resolved_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectFollowup {
+  id: string
+  source_kb_entry_id: string | null
+  project_cluster_id: string | null
+  gmail_thread_id: string
+  subject: string | null
+  awaiting_from: string
+  sent_at: string | null
+  status: FollowupStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface ProjectOperationalItem {
+  id:                  string
+  source_kb_entry_id:  string
+  project_cluster_id:  string | null
+  gmail_thread_id:     string
+  category:            string // 'action_item', 'blocker', 'follow_up', 'decision', etc.
+  description:         string
+  owner_hint:          string | null
+  assigned_member_id:  string | null
+  status:              string
+  priority:            'high' | 'medium' | 'low'
+  due_date:            string | null
+  source_date:         string
+  metadata:            Record<string, any>
+  created_at:          string
+  updated_at:          string
 }
 
 export interface KBSyncJob {

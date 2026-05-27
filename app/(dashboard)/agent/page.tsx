@@ -543,14 +543,6 @@ export default function AgentPage() {
           {/* Input bar */}
           <div className="border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/80 px-4 sm:px-8 py-4 space-y-2.5">
 
-            {/* Compliance Warning */}
-            <div className="flex items-center gap-2.5 px-4 py-3 bg-amber-50/70 dark:bg-amber-950/20 rounded-xl border border-amber-200/50 dark:border-amber-900/40">
-              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
-              <p className="text-[11.5px] text-amber-700 dark:text-amber-300 leading-snug">
-                <strong>Compliance Warning:</strong> Queries seeking personal or sensitive information (e.g. phone numbers, email addresses, personal contact info, salary details, health/leave status, personal life details) are strictly prohibited and monitored.
-              </p>
-            </div>
-
             {/* Doc format chooser (shown when agent returns a document intent) */}
             {showDocFmt && pendingQ && (
               <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-700">

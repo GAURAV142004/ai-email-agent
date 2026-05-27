@@ -121,10 +121,22 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
       if (bootstrap || !member.last_history_id) {
         threadIds = await fetchRecentThreadIds(accessToken, daysBack, refreshToken, maxThreadsPerMember)
       } else {
-        const result = await fetchNewMessages(accessToken, member.last_history_id, refreshToken)
-        // No arbitrary cap — process everything returned by the history API
-        threadIds    = result.threadIds
-        newHistoryId = result.newHistoryId
+        try {
+          const result = await fetchNewMessages(accessToken, member.last_history_id, refreshToken)
+          // No arbitrary cap — process everything returned by the history API
+          threadIds    = result.threadIds
+          newHistoryId = result.newHistoryId
+        } catch (err: any) {
+          // If Gmail history ID is expired or stale (often returns 400/404 after 7 days of inactivity),
+          // recover automatically by falling back to a date-based search of the last few days.
+          const isStaleHistory = err?.status === 404 || err?.status === 400 || 
+            String(err?.message || '').toLowerCase().includes('history')
+          if (isStaleHistory) {
+            threadIds = await fetchRecentThreadIds(accessToken, daysBack, refreshToken, maxThreadsPerMember)
+          } else {
+            throw err
+          }
+        }
       }
 
       emit({ type: 'member_start', memberEmail: member.email, totalThreads: threadIds.length })

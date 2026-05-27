@@ -15,6 +15,12 @@ import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
 import type { AgentConversation, AgentMessage } from '@/lib/supabase/types'
 
+interface ProjectChip {
+  id:         string
+  name:       string
+  entryCount: number
+}
+
 const LAST_CONV_KEY = 'agent_last_conv_id'
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
@@ -49,7 +55,15 @@ const STARTERS = [
 ]
 
 // ── Assistant bubble ──────────────────────────────────────────────────────────
-function AssistantBubble({ msg }: { msg: AgentMessage }) {
+function AssistantBubble({
+  msg,
+  projectChips,
+  onSelectProject,
+}: {
+  msg:             AgentMessage
+  projectChips?:   ProjectChip[]
+  onSelectProject?: (chip: ProjectChip) => void
+}) {
   async function download() {
     if (!msg.document_filename) return
     const res  = await fetch(`/api/documents/download?filename=${encodeURIComponent(msg.document_filename)}`)
@@ -71,25 +85,48 @@ function AssistantBubble({ msg }: { msg: AgentMessage }) {
     )
   }
 
+  const isClarifying = msg.response_type === 'clarifying_question'
+
   return (
     <div className="space-y-2.5">
       <div
         className="text-sm leading-relaxed"
         dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
       />
+
+      {/* Project chips — shown when agent asks clarifying question */}
+      {isClarifying && projectChips && projectChips.length > 0 && onSelectProject && (
+        <div className="flex flex-wrap gap-2 pt-1">
+          {projectChips.map(chip => (
+            <button
+              key={chip.id}
+              onClick={() => onSelectProject(chip)}
+              className="px-3 py-1.5 rounded-full text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-600 transition-all flex items-center gap-1.5"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-current" />
+              {chip.name}
+              <span className="opacity-60">({chip.entryCount})</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Source metadata */}
       <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-        {msg.kb_entries_referenced > 0 && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 text-[11px]">
-            <Sparkles className="w-3 h-3" />
-            {msg.kb_entries_referenced} source{msg.kb_entries_referenced !== 1 ? 's' : ''}
-          </span>
-        )}
         {(msg.project_clusters_referenced ?? []).map((c) => (
-          <Badge key={c} className="bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700 text-[11px] px-2 py-0.5 rounded-full">
+          <Badge key={c} className="bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700 text-[11px] px-2 py-0.5 rounded-full flex items-center gap-1">
+            <span className="w-1 h-1 rounded-full bg-blue-500" />
             {c}
           </Badge>
         ))}
+        {msg.kb_entries_referenced > 0 && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 text-[11px]">
+            <Sparkles className="w-3 h-3" />
+            {msg.kb_entries_referenced} KB entr{msg.kb_entries_referenced !== 1 ? 'ies' : 'y'}
+          </span>
+        )}
       </div>
+
       {msg.response_type === 'document' && msg.document_filename && (
         <Button size="sm" variant="outline" className="gap-2 h-7 text-xs" onClick={download}>
           <FileDown className="w-3.5 h-3.5" />
@@ -118,6 +155,10 @@ export default function AgentPage() {
   const [loadError,     setLoadError]     = useState<string | null>(null)
   const [showDocFmt,    setShowDocFmt]    = useState(false)
   const [pendingQ,      setPendingQ]      = useState<string | null>(null)
+  // projectChips: last set of project cluster details returned by the API
+  const [projectChips,  setProjectChips]  = useState<ProjectChip[]>([])
+  // lastClarifyingMsgId: the message that asked the clarifying question
+  const [lastClarifyMsgId, setLastClarifyMsgId] = useState<string | null>(null)
 
   // ── Auth guard ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -185,6 +226,8 @@ export default function AgentPage() {
     setLoadError(null)
     setShowDocFmt(false)
     setPendingQ(null)
+    setProjectChips([])
+    setLastClarifyMsgId(null)
     sessionStorage.removeItem(LAST_CONV_KEY)
     setTimeout(() => inputRef.current?.focus(), 50)
   }
@@ -199,7 +242,7 @@ export default function AgentPage() {
   }
 
   // ── Send query ────────────────────────────────────────────────────────────
-  const sendQuery = useCallback(async (query: string, docFormat?: 'xlsx' | 'csv' | 'pdf') => {
+  const sendQuery = useCallback(async (query: string, docFormat?: 'xlsx' | 'csv' | 'pdf', projectClusterId?: string) => {
     if (!query.trim() || generating) return
     setGenerating(true)
     setShowDocFmt(false)
@@ -220,7 +263,12 @@ export default function AgentPage() {
       const res = await fetch('/api/agent/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: query, conversationId: currentConvId ?? undefined, docFormat }),
+        body: JSON.stringify({
+          question: query,
+          conversationId: currentConvId ?? undefined,
+          docFormat,
+          projectClusterId,   // hint when user clicks a project chip
+        }),
       })
 
       if (!res.ok) {
@@ -228,7 +276,7 @@ export default function AgentPage() {
         throw new Error(err.error ?? `Request failed (${res.status})`)
       }
 
-      const data = await res.json()
+      const data           = await res.json()
       const resolvedConvId = data.conversationId ?? currentConvId ?? ''
 
       if (!currentConvId && data.conversationId) {
@@ -241,7 +289,7 @@ export default function AgentPage() {
         prev.map(m => m.id === tempId ? { ...m, conversation_id: resolvedConvId } : m)
       )
 
-      setMessages(prev => [...prev, {
+      const newMsg: AgentMessage = {
         id: data.messageId ?? `a-${Date.now()}`,
         conversation_id: resolvedConvId,
         role: 'assistant' as const,
@@ -255,7 +303,18 @@ export default function AgentPage() {
         was_blocked: data.wasBlocked ?? false,
         block_reason: data.blockReason ?? null,
         created_at: new Date().toISOString(),
-      }])
+      }
+      setMessages(prev => [...prev, newMsg])
+
+      // Handle clarifying question — store chips and mark the message
+      if (data.isClarifyingQuestion && data.projectClusterDetails?.length) {
+        setProjectChips(data.projectClusterDetails)
+        setLastClarifyMsgId(newMsg.id)
+      } else {
+        // Clear chips once a real answer comes in
+        setProjectChips([])
+        setLastClarifyMsgId(null)
+      }
     } catch (err: any) {
       setMessages(prev => [...prev, {
         id: `err-${Date.now()}`, conversation_id: currentConvId ?? '',
@@ -277,6 +336,17 @@ export default function AgentPage() {
     if (!q || generating) return
     setInput('')
     sendQuery(q)
+  }
+
+  // When user clicks a project chip after a clarifying question:
+  // re-send the previous question with the selected project as a hint
+  function handleSelectProject(chip: ProjectChip) {
+    setProjectChips([])
+    setLastClarifyMsgId(null)
+    // Find the last user message (before the clarifying question)
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')
+    const q = lastUserMsg?.content ?? chip.name
+    sendQuery(q, undefined, chip.id)
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -437,7 +507,11 @@ export default function AgentPage() {
                 )}>
                   {msg.role === 'user'
                     ? <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                    : <AssistantBubble msg={msg} />
+                    : <AssistantBubble
+                        msg={msg}
+                        projectChips={msg.id === lastClarifyMsgId ? projectChips : undefined}
+                        onSelectProject={msg.id === lastClarifyMsgId ? handleSelectProject : undefined}
+                      />
                   }
                 </div>
               </div>

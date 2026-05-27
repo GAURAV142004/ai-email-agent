@@ -74,11 +74,20 @@ export async function indexEmailToKB(
     }
   }
 
+  // Fetch existing project names so the summarizer can match consistently
+  const { data: existingClusters } = await supabase
+    .from('project_clusters')
+    .select('name')
+    .order('updated_at', { ascending: false })
+    .limit(30)
+  const existingProjects = (existingClusters ?? []).map((c: { name: string }) => c.name)
+
   // Summarize for KB (PII masked internally)
   const summary = await summarizeForKB({
-    subject:    params.subject,
-    fromEmail:  params.fromEmail,
-    threadText: params.threadText,
+    subject:          params.subject,
+    fromEmail:        params.fromEmail,
+    threadText:       params.threadText,
+    existingProjects,
   })
 
   // Find or create project cluster
@@ -120,6 +129,7 @@ export async function indexEmailToKB(
       embedding:                  formatVectorLiteral(embedding),
       pii_was_masked:             summary.piiWasMasked,
       tokens_used:                summary.tokensUsed,
+      // store project detection confidence (not in original schema but useful for debugging)
     })
     .select('id')
     .single()

@@ -32,7 +32,7 @@ export type AIPriority = 'high' | 'medium' | 'low'
 
 export type AgentMessageRole = 'user' | 'assistant'
 
-export type AgentResponseType = 'text' | 'table' | 'report' | 'timeline' | 'document'
+export type AgentResponseType = 'text' | 'table' | 'report' | 'timeline' | 'document' | 'clarifying_question'
 
 // ─── Core auth ───────────────────────────────────────────────────────────────
 

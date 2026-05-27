@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse }               from 'next/server'
 import { getConsentedMember, getServiceSupabase }  from '@/lib/auth'
-import { searchKB, searchAttachments }             from '@/lib/kb/search'
 import { checkKBAccess, checkResponseSafety }      from '@/lib/compliance/access-guard'
 import { logKBQuery }                              from '@/lib/compliance/audit-logger'
 import { checkRateLimit }                          from '@/lib/rate-limit'
@@ -9,6 +8,18 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
 import type { SupabaseClient }                     from '@supabase/supabase-js'
 import type { KBSearchResult, AttachmentSearchResult } from '@/lib/supabase/types'
 import type { TeamRole }                           from '@/lib/roles'
+import {
+  fetchAllProjectClusters,
+  detectProjectInQuery,
+  detectProjectInHistory,
+  fetchProjectKBHybrid,
+  fetchMultiProjectKB,
+  buildProjectContext,
+  buildMultiProjectContext,
+  isSpecificQuery,
+  type ProjectCluster,
+} from '@/lib/kb/project-fetch'
+import { searchAttachments }                       from '@/lib/kb/search'
 
 const bedrock = new BedrockRuntimeClient({
   region: process.env.AWS_REGION ?? 'ap-south-1',
@@ -34,46 +45,26 @@ async function fetchHistory(supabase: SupabaseClient, convId: string): Promise<H
   )
 }
 
-// ── Semantic intent expansion ─────────────────────────────────────────────────
-// Expands work-related keywords so the embedding search finds related entries
-// that use different wording (e.g. "CRITICAL" instead of "blocker").
-const INTENT_EXPANSIONS: Array<[RegExp, string]> = [
-  [/\b(blocker|blocking|blocked|stuck)\b/i,       'blocker critical urgent problem halted unable'],
-  [/\b(risk|risky|concern|warning)\b/i,            'risk concern warning danger mitigation challenge'],
-  [/\b(issue|problem|bug|defect|error)\b/i,        'issue problem defect error failure critical'],
-  [/\b(status|progress|update|how.{0,10}going)\b/i, 'status progress update milestone current state'],
-  [/\b(deadline|go.live|launch|delivery|due)\b/i,  'deadline go-live launch delivery date target approval'],
-  [/\b(action item|pending|outstanding|todo)\b/i,  'action item pending outstanding task owner due date'],
-  [/\b(decision|decided|agreed|approved)\b/i,      'decision decided agreed approved confirmed sign-off'],
-]
+// ── Resolve visible members for the viewer ────────────────────────────────────
+async function resolveVisibleMembers(
+  supabase:    SupabaseClient,
+  viewerRole:  TeamRole,
+): Promise<{ ids: string[]; map: Map<string, { name: string; role: string }> }> {
+  const visibleRoles = VISIBILITY_MAP[viewerRole]
+  const { data: members } = await supabase
+    .from('team_members')
+    .select('id, name, role')
+    .in('role', visibleRoles)
+    .eq('is_active', true)
 
-function expandQueryIntent(q: string): string {
-  for (const [pattern, expansion] of INTENT_EXPANSIONS) {
-    if (pattern.test(q)) return `${q} ${expansion}`
+  const list = members ?? []
+  return {
+    ids: list.map(m => m.id),
+    map: new Map(list.map(m => [m.id, m])),
   }
-  return q
-}
-
-// ── Enriched search query for short/vague follow-ups ─────────────────────────
-// When the query is short ("who owns it?", "and the deadline?"), we append
-// the last exchange so the embedding search finds the right project context.
-function buildSearchQuery(question: string, history: HistoryMsg[]): string {
-  let q = expandQueryIntent(question)
-  const wordCount = question.trim().split(/\s+/).length
-  if (wordCount <= 6 && history.length >= 2) {
-    const lastUser = [...history].reverse().find(m => m.role === 'user')
-    const lastBot  = [...history].reverse().find(m => m.role === 'assistant')
-    q = [q, lastUser?.content?.slice(0, 150), lastBot?.content?.slice(0, 200)]
-      .filter(Boolean).join(' ')
-  }
-  return q
 }
 
 // ── Aggregation query detection ───────────────────────────────────────────────
-// Queries that want information across ALL projects — "blockers", "action items",
-// "go-live dates", "risks". For these, vector search is unreliable because each
-// project may use different words for the same concept (e.g. "CRITICAL" vs "blocker").
-// We instead do a broad date-sorted fetch so every project is represented.
 const AGGREGATION_PATTERNS = [
   /\b(blocker|blocking|blocked|stuck|halt)\b/i,
   /\b(action item|pending|outstanding|open task|follow.?up)\b/i,
@@ -82,73 +73,7 @@ const AGGREGATION_PATTERNS = [
   /\b(status|progress|update).{0,20}\b(all|team|project|overall|across)\b/i,
   /\b(summary|overview|recap).{0,20}\b(all|project|everything|team)\b/i,
 ]
-
-function isAggregationQuery(q: string): boolean {
-  return AGGREGATION_PATTERNS.some(p => p.test(q))
-}
-
-// ── Broad KB scan ─────────────────────────────────────────────────────────────
-// Fetches recent entries across ALL visible projects without vector ranking.
-// Used when the query asks for information that spans multiple projects.
-async function broadScanKB(
-  supabase: SupabaseClient,
-  viewerRole: TeamRole,
-  limit: number,
-): Promise<KBSearchResult[]> {
-  const visibleRoles = VISIBILITY_MAP[viewerRole]
-  const { data: visMembers } = await supabase
-    .from('team_members')
-    .select('id, name, role')
-    .in('role', visibleRoles)
-    .eq('is_active', true)
-
-  if (!visMembers?.length) return []
-  const visIds = visMembers.map((m: { id: string }) => m.id)
-
-  const { data: entries } = await supabase
-    .from('email_knowledge_base')
-    .select('*')
-    .in('owner_member_id', visIds)
-    .order('email_date', { ascending: false })
-    .limit(limit)
-
-  const memberMap = new Map(visMembers.map((m: { id: string; name: string; role: string }) => [m.id, m]))
-
-  return (entries ?? []).map((entry: any) => ({
-    entry,
-    similarity: 0.75,
-    memberName: (memberMap.get(entry.owner_member_id) as any)?.name ?? 'Unknown',
-    memberRole: ((memberMap.get(entry.owner_member_id) as any)?.role ?? 'developer') as TeamRole,
-  }))
-}
-
-// ── Ambiguity detection ───────────────────────────────────────────────────────
-// Patterns where the user references "the client / the project / the issue"
-// without naming it — these are only ambiguous when history has no context
-// AND the KB returns results from multiple different projects.
-const VAGUE_REFS = [
-  /\bthe\s+(client|customer|vendor|partner)\b(?!\s+\w+ly)/i,
-  /\bthe\s+(project|engagement|account|contract)\b(?!\s+\w+ly)/i,
-  /\bthe\s+(issue|problem|bug|blocker|task|feature|module)\b/i,
-  /\b(which|what)\s+(client|project|issue)\b/i,
-  /^(what|how|who|when|why|any|tell me)\b.{0,30}$/i,  // very short, generic openers
-]
-
-function hasVagueReference(q: string): boolean {
-  return VAGUE_REFS.some(p => p.test(q))
-}
-
-// Whether conversation history already resolves a vague reference.
-// Only checks the USER's own messages — the assistant's answers are full of proper
-// nouns (project names it just mentioned) which would falsely suppress disambiguation.
-function historyResolvesContext(history: HistoryMsg[]): boolean {
-  if (history.length === 0) return false
-  const recentUserText = history.slice(-6)
-    .filter(m => m.role === 'user')
-    .map(m => m.content).join(' ')
-  // 5+ char capitalised word = likely a specific project / client name typed by the user
-  return /\b[A-Z][a-zA-Z]{4,}\b/.test(recentUserText)
-}
+const isAggregationQuery = (q: string) => AGGREGATION_PATTERNS.some(p => p.test(q))
 
 // ── File export intent ────────────────────────────────────────────────────────
 const FILE_RX = [
@@ -161,12 +86,12 @@ const wantsFile = (t: string) => FILE_RX.some(p => p.test(t))
 async function callAI(
   messages:   Array<{ role: string; content: Array<{ text: string }> }>,
   systemText: string,
-  maxTokens = 1400,
+  maxTokens = 1800,
 ): Promise<{ text: string; tokensUsed: number }> {
   const body   = JSON.stringify({
     messages,
     system:          [{ text: systemText }],
-    inferenceConfig: { maxTokens, temperature: 0.2 },
+    inferenceConfig: { maxTokens, temperature: 0.15 },
   })
   const resp   = await bedrock.send(new InvokeModelCommand({
     modelId: MODEL_ID, contentType: 'application/json',
@@ -179,128 +104,155 @@ async function callAI(
   }
 }
 
-// ── KB context builder ────────────────────────────────────────────────────────
-function buildKBContext(
-  emails:      KBSearchResult[],
-  attachments: AttachmentSearchResult[],
-): string {
-  const emailPart = emails.map((r, i) => {
-    const e = r.entry
-    const actionStr = (e.action_items as any[] ?? [])
-      .map((a: any) => `${a.owner_hint ?? 'Team'} → ${a.task}${a.due_date_hint ? ` (by ${a.due_date_hint})` : ''}`)
-      .join(' | ')
-    return [
-      `[Email ${i + 1} | Project: ${e.detected_project ?? 'Unknown'} | Date: ${e.email_date ? new Date(e.email_date).toLocaleDateString('en-IN') : 'Unknown'}]`,
-      `Summary: ${e.summary}`,
-      e.key_points?.length   ? `Key facts: ${e.key_points.join(' • ')}` : null,
-      actionStr              ? `Action items: ${actionStr}`              : null,
-    ].filter(Boolean).join('\n')
-  }).join('\n\n')
-
-  const docPart = attachments.map((r, i) => {
-    const a = r.attachment
-    return [
-      `[Doc ${i + 1} | File: ${a.filename} | Project: ${(a as any).detected_project ?? 'Unknown'} | Date: ${a.email_date ? new Date(a.email_date).toLocaleDateString('en-IN') : 'Unknown'}]`,
-      `Summary: ${a.summary ?? 'No summary'}`,
-      a.key_points?.length ? `Key facts: ${a.key_points.join(' • ')}` : null,
-    ].filter(Boolean).join('\n')
-  }).join('\n\n')
-
-  return [
-    emailPart ? `=== PROJECT EMAILS ===\n${emailPart}` : null,
-    docPart   ? `=== DOCUMENTS ===\n${docPart}`        : null,
-  ].filter(Boolean).join('\n\n')
-}
-
-// ── Signal types passed to the AI ────────────────────────────────────────────
-interface QuerySignals {
-  isAmbiguous:     boolean
-  ambiguousProjects: string[]    // project names found in KB results
-  isLowConfidence: boolean
-  maxSimilarity:   number
-  requestsFile:    boolean
-  hasHistory:      boolean
-}
-
-// ── AI synthesis ──────────────────────────────────────────────────────────────
-async function synthesize(
-  question:  string,
-  kbContext: string,
-  history:   HistoryMsg[],
-  sources:   number,
-  signals:   QuerySignals,
-): Promise<{ text: string; tokensUsed: number }> {
-
-  // ── Dynamic instruction blocks injected based on signals ──────────────────
-  const disambiguationBlock = signals.isAmbiguous
-    ? `\n=== DISAMBIGUATION REQUIRED ===
-The query is generic and the knowledge base returned results from ${signals.ambiguousProjects.length} different projects: ${signals.ambiguousProjects.join(', ')}.
-DO NOT attempt to answer. Instead, ask the user ONE specific clarifying question.
-Example: "Are you asking about ${signals.ambiguousProjects[0]} or ${signals.ambiguousProjects[1] ?? 'another project'}?"
-Keep the question short and natural.`
-    : ''
-
-  const confidenceBlock = signals.isLowConfidence && !signals.isAmbiguous
-    ? `\n=== LOW CONFIDENCE MATCH ===
-The knowledge base search returned very weak matches (best relevance: ${Math.round(signals.maxSimilarity * 100)}%).
-DO NOT guess, assume, or generate a random or weak response. Instead, state clearly that you cannot find a confident match for their query, and ask the user a specific, helpful clarifying question (e.g. asking which project, topic, or sender they are referring to) to help narrow it down.`
-    : ''
-
-  const fileBlock = signals.requestsFile
-    ? `\n=== FILE EXPORT MODE ===
-Structure your response with ## headers, tables (| col | col |) for tabular data, and bullet lists.
-Be thorough. Include all KB-supported details — this will be converted to a downloadable file.`
-    : ''
-
-  const system = `You are an intelligent project knowledge assistant for a software delivery team.
-You answer questions using ONLY facts explicitly present in the KB data provided.
-
-=== ANTI-HALLUCINATION RULES (highest priority) ===
-- NEVER invent, infer, or extrapolate facts not present in the KB data.
-- NEVER fill gaps with general knowledge or assumptions.
-- If a fact is not in the KB, say exactly: "I don't have that in the knowledge base."
-- You may only state what the KB data directly supports.
-- When you cite a fact, you may optionally note the project name and date.
-${disambiguationBlock}${confidenceBlock}${fileBlock}
-
-=== INTENT UNDERSTANDING ===
-- Understand natural language intent: "What's cooking with Infosys?" = Infosys project status.
-- Resolve references ("that task", "them", "it") using CONVERSATION HISTORY.
-- If ambiguous even with history, ask ONE specific clarifying question — never multiple.
-- Short/colloquial queries are valid. Match them semantically to KB content.
-
-=== RESPONSE FORMAT ===
-- Simple fact → 1–3 sentences.
-- Multiple items → bullet list; action items: owner → task → due date.
-- No openers: "Certainly!", "Great question!", "Sure!".
-- No closers: "Hope this helps!", "Feel free to ask!", "Let me know!".
-- No filler: "In summary", "Overall", "Moving forward".
-- If nothing relevant in KB → state clearly that you cannot find any matching records in the project knowledge base, and ask the user a clarifying question to refine the search.
-
-=== SCOPE ===
-Project and work information only. Redirect personal queries back to project topics.`
-
-  const msgs: Array<{ role: string; content: Array<{ text: string }> }> = []
-
-  for (const m of history.slice(-8)) {
-    msgs.push({ role: m.role, content: [{ text: m.content }] })
-  }
-
-  const userText = sources > 0
-    ? `Question: ${question}\n\nKB Data (${sources} sources, max relevance ${Math.round(signals.maxSimilarity * 100)}%):\n${kbContext}\n\nAnswer:`
-    : `Question: ${question}\n\nKB Data: No matching entries found.\n\nAnswer:`
-
-  msgs.push({ role: 'user', content: [{ text: userText }] })
-
-  return callAI(msgs, system, signals.requestsFile ? 2200 : 1400)
-}
-
 // ── Response type detection ───────────────────────────────────────────────────
 function detectResponseType(text: string): string {
   if (/\|.+\|.+\|/.test(text) && /---/.test(text)) return 'table'
   if (/^#{1,3}\s/m.test(text))                      return 'report'
   if (/\bQ[1-4]\s+20\d\d\b/i.test(text))           return 'timeline'
   return 'text'
+}
+
+// ── AI Synthesis — project-aware ──────────────────────────────────────────────
+async function synthesize(params: {
+  question:     string
+  kbContext:    string
+  history:      HistoryMsg[]
+  projectNames: string[]
+  strategy:     string
+  requestsFile: boolean
+  entryCount:   number
+}): Promise<{ text: string; tokensUsed: number }> {
+
+  const fileBlock = params.requestsFile
+    ? `\n=== FILE EXPORT MODE ===
+Structure your response with ## headers, tables (| col | col |) for tabular data, and bullet lists.
+Be thorough. Include all KB-supported details — this will be converted to a downloadable file.`
+    : ''
+
+  const projectScope = params.projectNames.length === 1
+    ? `You are currently answering questions about the "${params.projectNames[0]}" project knowledge base.`
+    : params.projectNames.length > 1
+      ? `You have access to ${params.projectNames.length} project knowledge bases: ${params.projectNames.join(', ')}.`
+      : 'You have access to the full project knowledge base.'
+
+  const system = `You are an intelligent project knowledge assistant for a software delivery team.
+You answer questions using ONLY facts explicitly present in the KB data provided below.
+${projectScope}
+
+=== ANTI-HALLUCINATION RULES (highest priority) ===
+- NEVER invent, infer, or extrapolate facts not present in the KB data.
+- NEVER fill gaps with general knowledge or assumptions.
+- If a fact is not in the KB data, say exactly: "I don't have that in the knowledge base."
+- You may only state what the KB data directly supports.
+- When you cite a fact, mention the project name and approximate date.
+
+=== INTENT UNDERSTANDING ===
+- Understand natural language intent: "What's cooking with Infosys?" = Infosys project status.
+- Resolve references ("that task", "them", "it") using CONVERSATION HISTORY.
+- Short/colloquial queries are valid. Match them semantically to KB content.
+- You have been given ${params.entryCount} KB entries using strategy: ${params.strategy}.
+
+=== RESPONSE FORMAT ===
+- Simple fact → 1–3 sentences.
+- Multiple items → bullet list; action items: owner → task → due date.
+- Multi-project overview → group by project name as ## headers.
+- No openers: "Certainly!", "Great question!", "Sure!".
+- No closers: "Hope this helps!", "Feel free to ask!", "Let me know!".
+- No filler: "In summary", "Overall", "Moving forward".
+- If nothing relevant in KB → state clearly and ask ONE specific clarifying question.
+
+=== SCOPE ===
+Project and work information only. Redirect personal queries back to project topics.${fileBlock}`
+
+  const msgs: Array<{ role: string; content: Array<{ text: string }> }> = []
+
+  for (const m of params.history.slice(-8)) {
+    msgs.push({ role: m.role, content: [{ text: m.content }] })
+  }
+
+  const userText = params.entryCount > 0
+    ? `Question: ${params.question}\n\nKB Data (${params.entryCount} entries from ${params.projectNames.join(', ') || 'all projects'}):\n${params.kbContext}\n\nAnswer:`
+    : `Question: ${params.question}\n\nKB Data: No matching entries found.\n\nAnswer:`
+
+  msgs.push({ role: 'user', content: [{ text: userText }] })
+
+  return callAI(msgs, system, params.requestsFile ? 2800 : 1800)
+}
+
+// ── Smart clarifying question generator ──────────────────────────────────────
+// The AI asks a well-formed clarifying question when it can't confidently
+// determine which project the user is asking about.
+// Only fires when BOTH conditions are true:
+//   1. Query is ambiguous (no project detected in query OR history)
+//   2. Multiple projects exist in the KB (otherwise there's no ambiguity)
+
+function buildClarifyingQuestionResponse(
+  question:         string,
+  availableClusters: ProjectCluster[],
+  history:           HistoryMsg[],
+): string {
+  const projectList = availableClusters
+    .slice(0, 8)   // cap at 8 so the question stays concise
+    .map(c => `• **${c.name}** (${c.entryCount} email${c.entryCount !== 1 ? 's' : ''})`)
+    .join('\n')
+
+  // Tailor the question based on what the user asked
+  const qLower    = question.toLowerCase()
+  const wantsWhat = qLower.includes('status')   ? 'status'
+    : qLower.includes('action') || qLower.includes('task') ? 'action items'
+    : qLower.includes('risk')   || qLower.includes('blocker') ? 'risks/blockers'
+    : qLower.includes('update')                  ? 'updates'
+    : 'information'
+
+  const hasHistory = history.length > 0
+  const prefix     = hasHistory
+    ? 'I want to make sure I pull from the right project knowledge base.'
+    : "I can see you're asking about project " + wantsWhat + '.'
+
+  return `${prefix} Which project are you referring to?\n\n${projectList}\n\nJust mention the project name (or part of it) and I'll fetch the full knowledge base for it.`
+}
+
+// ── Decide whether to ask a clarifying question ───────────────────────────────
+// Returns true ONLY when asking is genuinely necessary.
+// Goal: Never ask when context is clear. Only ask when truly ambiguous.
+
+function shouldAskClarifyingQuestion(
+  question:         string,
+  detectedProject:  ProjectCluster | null,
+  availableClusters: ProjectCluster[],
+  history:           HistoryMsg[],
+  isAggregation:     boolean,
+): boolean {
+  // Never ask for aggregation queries (they span all projects by design)
+  if (isAggregation) return false
+
+  // Never ask if we already detected a project
+  if (detectedProject) return false
+
+  // Never ask if only 0–1 projects exist (no ambiguity)
+  if (availableClusters.length <= 1) return false
+
+  // Never ask if the KB is empty (just say "no data found")
+  if (availableClusters.every(c => c.entryCount === 0)) return false
+
+  // Never ask for very short follow-up queries in an active conversation
+  // (they're almost certainly following up on the previous answer's project)
+  const wordCount = question.trim().split(/\s+/).length
+  if (wordCount <= 5 && history.length >= 2) return false
+
+  // Never ask for casual factual lookups that don't need project scoping
+  const SELF_SCOPING = [
+    /\bwhat (projects|clients|accounts) (do we have|are there|exist)/i,
+    /\blist (all |the |my )?(projects|clients|accounts)/i,
+    /\bhow many (projects|clients)/i,
+  ]
+  if (SELF_SCOPING.some(p => p.test(question))) return false
+
+  // Ask only when:
+  //   - Multiple projects exist (≥2)
+  //   - No project detected from query or history
+  //   - Query is substantive (not a very short follow-up)
+  return true
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────
@@ -320,20 +272,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const question       = (body?.question ?? '').trim()
   const conversationId = body?.conversationId as string | undefined
   const explicitFormat = body?.docFormat as string | undefined
+  const hintClusterId  = body?.projectClusterId as string | undefined   // sent when user clicks a project chip
 
   if (!question) return NextResponse.json({ error: 'question is required' }, { status: 400 })
   if (question.length > 2000) return NextResponse.json({ error: 'Question too long' }, { status: 400 })
 
   const supabase = getServiceSupabase()
 
-  // Mentioned member detection
+  // ── Compliance check ────────────────────────────────────────────────────────
   const { data: allMembers } = await supabase
     .from('team_members').select('id, name, role').eq('is_active', true)
   const mentioned = (allMembers ?? []).find(
     (m: any) => question.toLowerCase().includes(m.name.toLowerCase()),
   ) as { id: string; name: string; role: TeamRole } | undefined
 
-  // Compliance check
   const access = checkKBAccess({ viewerRole: member.role, queryText: question, targetMemberRole: mentioned?.role })
   if (!access.allowed) {
     await logKBQuery(supabase, {
@@ -343,96 +295,219 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     })
     return NextResponse.json({
       answer: '🚫 Compliance Violation: This query touches on personal or sensitive topics that are outside the scope of the project knowledge base. This attempt has been logged for compliance auditing.',
-      wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0,
+      wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [],
+      projectClusterDetails: [], tokensUsed: 0,
     })
   }
 
-  // History + intent signals (computed before search so they can influence strategy)
-  const history         = conversationId ? await fetchHistory(supabase, conversationId) : []
-  const searchQuery     = buildSearchQuery(question, history)
-  const requestsFile    = !!(explicitFormat || wantsFile(question))
-  const queryIsVague    = hasVagueReference(question)
-  const contextResolved = historyResolvesContext(history)
-
-  // Cross-project aggregation queries ("blockers", "action items", "go-live dates")
-  // bypass vector search and scan all recent KB entries so no project gets missed.
-  const wantsBroadScan = isAggregationQuery(question) && !contextResolved
-
-  // KB search
-  const searchParams = {
-    query: searchQuery, viewerRole: member.role, viewerMemberId: member.id,
-    memberIds: mentioned ? [mentioned.id] : undefined,
-  }
-  const [emailResults, attachmentResults] = await Promise.all([
-    wantsBroadScan
-      ? broadScanKB(supabase, member.role as TeamRole, 18)
-      : searchKB(supabase, { ...searchParams, limit: 12 }),
-    searchAttachments(supabase, { ...searchParams, limit: 8 }),
+  // ── Load history + visible members + all project clusters ───────────────────
+  const [history, { ids: memberIds, map: memberMap }, availableClusters] = await Promise.all([
+    conversationId ? fetchHistory(supabase, conversationId) : Promise.resolve([] as HistoryMsg[]),
+    resolveVisibleMembers(supabase, member.role as TeamRole),
+    fetchAllProjectClusters(supabase, member.role as TeamRole, member.id),
   ])
 
-  const totalSources  = emailResults.length + attachmentResults.length
-  const allSimilarity = [
-    ...emailResults.map(r => r.similarity),
-    ...attachmentResults.map(r => r.similarity),
-  ]
-  const maxSimilarity = allSimilarity.length > 0 ? Math.max(...allSimilarity) : 0
+  if (!memberIds.length) {
+    return NextResponse.json({
+      answer: 'No team member data found. Please check that your account is active and has proper role assignments.',
+      wasBlocked: false, responseType: 'text', kbEntriesUsed: 0, projectClusters: [],
+      projectClusterDetails: [], tokensUsed: 0,
+    })
+  }
 
-  // Build signals for the AI
-  const uniqueProjects = [...new Set(
-    emailResults.map(r => r.entry.detected_project).filter((p): p is string => !!p),
-  )]
+  const requestsFile  = !!(explicitFormat || wantsFile(question))
+  const isAggregation = isAggregationQuery(question)
+  const isSpecific    = isSpecificQuery(question)
 
-  // For vague queries with no history context, check KB-wide project diversity —
-  // the vector search may have returned only 1 project even though multiple exist,
-  // simply because one project's content is semantically closer to the query.
-  let kbProjectNames = uniqueProjects
-  if (queryIsVague && !contextResolved) {
-    const visibleRoles = VISIBILITY_MAP[member.role as TeamRole]
-    const { data: visMembers } = await supabase
-      .from('team_members').select('id').in('role', visibleRoles).eq('is_active', true)
-    const visIds = (visMembers ?? []).map((m: { id: string }) => m.id)
-    if (visIds.length > 0) {
-      const { data: kbRows } = await supabase
-        .from('email_knowledge_base')
-        .select('detected_project')
-        .in('owner_member_id', visIds)
-        .not('detected_project', 'is', null)
-      kbProjectNames = [...new Set(
-        (kbRows ?? []).map((r: { detected_project: string }) => r.detected_project).filter(Boolean)
-      )] as string[]
+  // ── Project detection (query → history → hint from UI → null) ──────────────
+  let detectedProject: ProjectCluster | null = null
+
+  // 1. If frontend sends an explicit cluster ID (user clicked a project chip)
+  if (hintClusterId) {
+    detectedProject = availableClusters.find(c => c.id === hintClusterId) ?? null
+  }
+
+  // 2. Try to detect from the query text itself
+  if (!detectedProject) {
+    detectedProject = detectProjectInQuery(question, availableClusters)
+  }
+
+  // 3. Try to resolve from conversation history
+  if (!detectedProject && history.length > 0) {
+    detectedProject = detectProjectInHistory(history, availableClusters)
+  }
+
+  // ── Decision: Ask clarifying question? ─────────────────────────────────────
+  const needsClarification = shouldAskClarifyingQuestion(
+    question,
+    detectedProject,
+    availableClusters,
+    history,
+    isAggregation,
+  )
+
+  if (needsClarification) {
+    const clarifyingAnswer = buildClarifyingQuestionResponse(question, availableClusters, history)
+
+    // Persist conversation
+    let convId = conversationId
+    if (!convId) {
+      const { data: conv } = await supabase
+        .from('agent_conversations')
+        .insert({ member_id: member.id, title: question.slice(0, 70) })
+        .select('id').single()
+      convId = conv?.id
+    }
+
+    if (convId) {
+      await supabase.from('agent_messages').insert({ conversation_id: convId, role: 'user', content: question })
+      await supabase.from('agent_messages').insert({
+        conversation_id:             convId,
+        role:                        'assistant',
+        content:                     clarifyingAnswer,
+        kb_entries_referenced:       0,
+        project_clusters_referenced: [],
+        response_type:               'clarifying_question',
+        tokens_used:                 0,
+        was_blocked:                 false,
+      })
+    }
+
+    await logKBQuery(supabase, {
+      queriedBy: member.id, queryText: question, wasBlocked: false,
+      kbEntriesAccessed: 0, responseType: 'clarifying_question',
+    })
+
+    return NextResponse.json({
+      answer:               clarifyingAnswer,
+      wasBlocked:           false,
+      responseType:         'clarifying_question',
+      projectClusters:      [],
+      projectClusterDetails: availableClusters.slice(0, 8).map(c => ({ id: c.id, name: c.name, entryCount: c.entryCount })),
+      kbEntriesUsed:        0,
+      conversationId:       convId,
+      tokensUsed:           0,
+      isClarifyingQuestion: true,
+    })
+  }
+
+  // ── KB fetch strategy ───────────────────────────────────────────────────────
+  let kbContext      = ''
+  let projectNames:  string[] = []
+  let totalEntries   = 0
+  let strategy       = 'none'
+  let attachResults: AttachmentSearchResult[] = []
+
+  if (isAggregation && !detectedProject) {
+    // Cross-project aggregation: fetch recent entries from ALL projects grouped
+    const grouped = await fetchMultiProjectKB(supabase, memberIds, memberMap)
+    kbContext    = buildMultiProjectContext(grouped)
+    projectNames = [...grouped.keys()]
+    totalEntries = [...grouped.values()].reduce((s, a) => s + a.length, 0)
+    strategy     = 'multi_project_aggregation'
+  } else if (detectedProject) {
+    // Single-project fetch with Option C hybrid strategy
+    const fetch = await fetchProjectKBHybrid(
+      supabase,
+      detectedProject.id,
+      memberIds,
+      question,
+      memberMap,
+      isSpecific,
+    )
+    kbContext    = buildProjectContext(fetch.results, detectedProject.name, fetch.strategy)
+    projectNames = [detectedProject.name]
+    totalEntries = fetch.results.length
+    strategy     = fetch.strategy
+
+    // Also fetch attachments for this project
+    try {
+      attachResults = await searchAttachments(supabase, {
+        query:            question,
+        viewerRole:       member.role as TeamRole,
+        viewerMemberId:   member.id,
+        projectClusterId: detectedProject.id,
+        limit:            6,
+      })
+      if (attachResults.length) {
+        const docSection = attachResults.map((r, i) => {
+          const a = r.attachment
+          return [
+            `[Doc ${i + 1} | File: ${a.filename} | Date: ${a.email_date ? new Date(a.email_date).toLocaleDateString('en-IN') : 'Unknown'}]`,
+            `Summary: ${a.summary ?? 'No summary'}`,
+            a.key_points?.length ? `Key facts: ${a.key_points.join(' • ')}` : null,
+          ].filter(Boolean).join('\n')
+        }).join('\n\n')
+        kbContext += `\n\n=== DOCUMENTS & ATTACHMENTS ===\n${docSection}`
+        totalEntries += attachResults.length
+      }
+    } catch { /* attachment search failure is non-critical */ }
+
+  } else if (availableClusters.length === 1) {
+    // Only one project exists — use it automatically, no need to ask
+    const onlyCluster = availableClusters[0]
+    const fetch = await fetchProjectKBHybrid(
+      supabase,
+      onlyCluster.id,
+      memberIds,
+      question,
+      memberMap,
+      isSpecific,
+    )
+    kbContext    = buildProjectContext(fetch.results, onlyCluster.name, fetch.strategy)
+    projectNames = [onlyCluster.name]
+    totalEntries = fetch.results.length
+    strategy     = fetch.strategy
+  } else {
+    // No project detected, no aggregation, no single project — do broad recent scan
+    const { data: recentEntries } = await supabase
+      .from('email_knowledge_base')
+      .select('*')
+      .in('owner_member_id', memberIds)
+      .order('email_date', { ascending: false })
+      .limit(20)
+
+    if (recentEntries?.length) {
+      const grouped = new Map<string, KBSearchResult[]>()
+      for (const entry of recentEntries as any[]) {
+        const p = entry.detected_project ?? 'Unknown'
+        if (!grouped.has(p)) grouped.set(p, [])
+        grouped.get(p)!.push({
+          entry, similarity: 0.6,
+          memberName: (memberMap.get(entry.owner_member_id) as any)?.name ?? 'Unknown',
+          memberRole: ((memberMap.get(entry.owner_member_id) as any)?.role ?? 'developer') as TeamRole,
+        })
+      }
+      kbContext    = buildMultiProjectContext(grouped)
+      projectNames = [...grouped.keys()]
+      totalEntries = recentEntries.length
+      strategy     = 'broad_recent'
     }
   }
 
-  const isAmbiguous    = queryIsVague && !contextResolved && kbProjectNames.length >= 2
-  const isLowConfidence = totalSources > 0 && maxSimilarity < 0.38
-
-  const signals: QuerySignals = {
-    isAmbiguous,
-    ambiguousProjects: kbProjectNames.slice(0, 5),   // cap at 5 to keep AI prompt concise
-    isLowConfidence,
-    maxSimilarity,
-    requestsFile,
-    hasHistory: history.length > 0,
-  }
-
-  const kbContext = totalSources > 0 ? buildKBContext(emailResults, attachmentResults) : ''
-
-  // AI synthesis
+  // ── AI synthesis ────────────────────────────────────────────────────────────
   let synth: { text: string; tokensUsed: number }
   try {
-    synth = await synthesize(question, kbContext, history, totalSources, signals)
+    synth = await synthesize({
+      question,
+      kbContext,
+      history,
+      projectNames,
+      strategy,
+      requestsFile,
+      entryCount: totalEntries,
+    })
   } catch {
-    const fallback = totalSources > 0
-      ? emailResults.map(r => `• [${r.entry.detected_project ?? 'Unknown'}] ${r.entry.summary}`).join('\n')
+    const fallback = totalEntries > 0
+      ? `Based on ${totalEntries} KB entries for ${projectNames.join(', ')}, I encountered a processing error. Please try again.`
       : 'No matching information found. Try rephrasing or running a KB sync first.'
     synth = { text: fallback, tokensUsed: 0 }
   }
 
-  // Safety + response type
+  // ── Safety check ────────────────────────────────────────────────────────────
   const safety      = checkResponseSafety(synth.text)
   const finalAnswer = safety.allowed ? synth.text : 'This response was blocked to protect team member privacy.'
   const respType    = requestsFile && safety.allowed ? 'document' : detectResponseType(finalAnswer)
-  const clusters    = uniqueProjects
 
   let fileFormat: 'xlsx' | 'csv' | 'pdf' = 'xlsx'
   if (explicitFormat === 'csv' || explicitFormat === 'xlsx' || explicitFormat === 'pdf') {
@@ -449,7 +524,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       ? 'application/pdf'
       : 'text/csv'
 
-  // Persist conversation
+  // ── Persist conversation ─────────────────────────────────────────────────────
   let convId = conversationId
   if (!convId) {
     const { data: conv } = await supabase
@@ -473,8 +548,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         conversation_id:             convId,
         role:                        'assistant',
         content:                     finalAnswer,
-        kb_entries_referenced:       totalSources,
-        project_clusters_referenced: clusters,
+        kb_entries_referenced:       totalEntries,
+        project_clusters_referenced: projectNames,
         response_type:               respType,
         document_filename:           requestsFile && safety.allowed ? documentFilename : null,
         document_mime_type:          requestsFile && safety.allowed ? documentMime : null,
@@ -488,15 +563,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   await logKBQuery(supabase, {
     queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id,
-    wasBlocked: !safety.allowed, kbEntriesAccessed: totalSources,
-    projectClustersHit: clusters, responseType: respType,
+    wasBlocked: !safety.allowed, kbEntriesAccessed: totalEntries,
+    projectClustersHit: projectNames, responseType: respType,
   })
 
   return NextResponse.json({
-    answer: finalAnswer, wasBlocked: !safety.allowed,
-    responseType: respType, projectClusters: clusters,
-    kbEntriesUsed: totalSources, conversationId: convId,
-    messageId, tokensUsed: synth.tokensUsed,
-    documentFilename: requestsFile && safety.allowed ? documentFilename : undefined,
+    answer:               finalAnswer,
+    wasBlocked:           !safety.allowed,
+    responseType:         respType,
+    projectClusters:      projectNames,
+    projectClusterDetails: availableClusters.slice(0, 8).map(c => ({
+      id: c.id, name: c.name, entryCount: c.entryCount,
+    })),
+    kbEntriesUsed:        totalEntries,
+    kbStrategy:           strategy,
+    conversationId:       convId,
+    messageId,
+    tokensUsed:           synth.tokensUsed,
+    documentFilename:     requestsFile && safety.allowed ? documentFilename : undefined,
+    isClarifyingQuestion: false,
   })
 }

@@ -428,3 +428,4 @@ Gmail Inbox
 - **New nav item**: add to `navItems` array in `Sidebar.tsx`.
 - **Dark mode on a new component**: use `dark:` Tailwind prefix with `slate-*` colours (e.g. `bg-white dark:bg-slate-900`, `text-slate-800 dark:text-slate-100`, `border-slate-200 dark:border-slate-800`).
 - **Adding a new page**: create under `app/(dashboard)/` — it automatically gets the Sidebar + Header layout.
+

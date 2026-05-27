@@ -1,12 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/cron/kb-sync",
-      "schedule": "*/10 * * * *"
-    },
-    {
-      "path": "/api/cron/cleanup-personal",
-      "schedule": "0 1 * * *"
+      "path": "/api/cron/daily",
+      "schedule": "0 0 * * *"
     }
   ]
 }

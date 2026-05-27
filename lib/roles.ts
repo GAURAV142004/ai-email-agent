@@ -61,13 +61,13 @@ export function isManagerRole(role: TeamRole): boolean {
 }
 
 export function getNavItems(role: TeamRole) {
-  const dashboard = { label: 'Dashboard',    href: '/',               icon: 'LayoutDashboard' };
   const agent     = { label: 'Agent',        href: '/agent',          icon: 'Sparkles'        };
-  const users     = { label: 'Manage Users', href: '/settings/users', icon: 'UserCog'         };
   const settings  = { label: 'Settings',     href: '/settings',       icon: 'Settings'        };
+  const users     = { label: 'Manage Users', href: '/settings/users', icon: 'UserCog'         };
 
-  if (role === 'delivery_lead')                                        return [dashboard, agent, users, settings];
-  if (role === 'senior_ba' || role === 'senior_mis' ||
-      role === 'senior_developer')                                     return [dashboard, agent, users, settings];
-  return [dashboard, agent, settings];
+  if (role === 'delivery_lead') {
+    return [agent, users, settings];
+  }
+  return [agent, settings];
 }
+

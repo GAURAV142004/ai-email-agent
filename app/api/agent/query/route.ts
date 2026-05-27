@@ -242,9 +242,8 @@ Keep the question short and natural.`
 
   const confidenceBlock = signals.isLowConfidence && !signals.isAmbiguous
     ? `\n=== LOW CONFIDENCE MATCH ===
-The knowledge base search returned weak matches (best relevance: ${Math.round(signals.maxSimilarity * 100)}%).
-The KB data below may not directly answer the question.
-State what you can confirm from the data and explicitly say "I don't have a confident answer on [specific aspect]" for anything unclear.`
+The knowledge base search returned very weak matches (best relevance: ${Math.round(signals.maxSimilarity * 100)}%).
+DO NOT guess, assume, or generate a random or weak response. Instead, state clearly that you cannot find a confident match for their query, and ask the user a specific, helpful clarifying question (e.g. asking which project, topic, or sender they are referring to) to help narrow it down.`
     : ''
 
   const fileBlock = signals.requestsFile
@@ -276,7 +275,7 @@ ${disambiguationBlock}${confidenceBlock}${fileBlock}
 - No openers: "Certainly!", "Great question!", "Sure!".
 - No closers: "Hope this helps!", "Feel free to ask!", "Let me know!".
 - No filler: "In summary", "Overall", "Moving forward".
-- If nothing relevant in KB → say so, then ask one question to refine the search.
+- If nothing relevant in KB → state clearly that you cannot find any matching records in the project knowledge base, and ask the user a clarifying question to refine the search.
 
 === SCOPE ===
 Project and work information only. Redirect personal queries back to project topics.`
@@ -343,7 +342,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       personalTopicsFound: access.personalTopicsFound,
     })
     return NextResponse.json({
-      answer: 'That query touches on personal topics outside the scope of the project knowledge base.',
+      answer: '🚫 Compliance Violation: This query touches on personal or sensitive topics that are outside the scope of the project knowledge base. This attempt has been logged for compliance auditing.',
       wasBlocked: true, responseType: 'text', kbEntriesUsed: 0, projectClusters: [], tokensUsed: 0,
     })
   }
@@ -435,6 +434,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const respType    = requestsFile && safety.allowed ? 'document' : detectResponseType(finalAnswer)
   const clusters    = uniqueProjects
 
+  let fileFormat: 'xlsx' | 'csv' | 'pdf' = 'xlsx'
+  if (explicitFormat === 'csv' || explicitFormat === 'xlsx' || explicitFormat === 'pdf') {
+    fileFormat = explicitFormat as any
+  } else {
+    const qLower = question.toLowerCase()
+    if (qLower.includes('csv')) fileFormat = 'csv'
+    else if (qLower.includes('pdf')) fileFormat = 'pdf'
+  }
+  const documentFilename = `project_report_${Date.now()}.${fileFormat}`
+  const documentMime = fileFormat === 'xlsx'
+    ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    : fileFormat === 'pdf'
+      ? 'application/pdf'
+      : 'text/csv'
+
   // Persist conversation
   let convId = conversationId
   if (!convId) {
@@ -462,6 +476,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         kb_entries_referenced:       totalSources,
         project_clusters_referenced: clusters,
         response_type:               respType,
+        document_filename:           requestsFile && safety.allowed ? documentFilename : null,
+        document_mime_type:          requestsFile && safety.allowed ? documentMime : null,
         tokens_used:                 synth.tokensUsed,
         was_blocked:                 !safety.allowed,
         block_reason:                safety.allowed ? null : 'Personal topic in response',
@@ -481,5 +497,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     responseType: respType, projectClusters: clusters,
     kbEntriesUsed: totalSources, conversationId: convId,
     messageId, tokensUsed: synth.tokensUsed,
+    documentFilename: requestsFile && safety.allowed ? documentFilename : undefined,
   })
 }

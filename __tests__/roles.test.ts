@@ -71,44 +71,44 @@ describe('hasTeam', () => {
 // ─── getNavItems ─────────────────────────────────────────────────────────────
 
 describe('getNavItems', () => {
-  it('delivery_lead gets 6 items', () =>
-    expect(getNavItems('delivery_lead')).toHaveLength(6))
+  it('delivery_lead gets 3 items', () =>
+    expect(getNavItems('delivery_lead')).toHaveLength(3))
 
-  it('senior_ba gets 4 items', () =>
-    expect(getNavItems('senior_ba')).toHaveLength(4))
+  it('senior_ba gets 2 items', () =>
+    expect(getNavItems('senior_ba')).toHaveLength(2))
 
-  it('senior_mis gets 4 items', () =>
-    expect(getNavItems('senior_mis')).toHaveLength(4))
+  it('senior_mis gets 2 items', () =>
+    expect(getNavItems('senior_mis')).toHaveLength(2))
 
-  it('senior_developer gets 4 items', () =>
-    expect(getNavItems('senior_developer')).toHaveLength(4))
+  it('senior_developer gets 2 items', () =>
+    expect(getNavItems('senior_developer')).toHaveLength(2))
 
-  it('ba gets 3 items', () =>
-    expect(getNavItems('ba')).toHaveLength(3))
+  it('ba gets 2 items', () =>
+    expect(getNavItems('ba')).toHaveLength(2))
 
-  it('mis gets 3 items', () =>
-    expect(getNavItems('mis')).toHaveLength(3))
+  it('mis gets 2 items', () =>
+    expect(getNavItems('mis')).toHaveLength(2))
 
-  it('developer gets 3 items', () =>
-    expect(getNavItems('developer')).toHaveLength(3))
-
-  it('delivery_lead nav includes /monitor', () =>
-    expect(getNavItems('delivery_lead').map(i => i.href)).toContain('/monitor'))
+  it('developer gets 2 items', () =>
+    expect(getNavItems('developer')).toHaveLength(2))
 
   it('delivery_lead nav includes /settings/users', () =>
     expect(getNavItems('delivery_lead').map(i => i.href)).toContain('/settings/users'))
 
-  it('senior_ba nav includes /team', () =>
-    expect(getNavItems('senior_ba').map(i => i.href)).toContain('/team'))
-
-  it('ba nav does not include /team', () =>
-    expect(getNavItems('ba').map(i => i.href)).not.toContain('/team'))
-
-  it('all nav variants include / and /tasks', () => {
+  it('all nav variants include /agent and /settings', () => {
     for (const role of ALL_ROLES) {
       const hrefs = getNavItems(role).map(i => i.href)
-      expect(hrefs).toContain('/')
-      expect(hrefs).toContain('/tasks')
+      expect(hrefs).toContain('/agent')
+      expect(hrefs).toContain('/settings')
+    }
+  })
+
+  it('no nav variants include tasks, team, or monitor', () => {
+    for (const role of ALL_ROLES) {
+      const hrefs = getNavItems(role).map(i => i.href)
+      expect(hrefs).not.toContain('/tasks')
+      expect(hrefs).not.toContain('/team')
+      expect(hrefs).not.toContain('/monitor')
     }
   })
 })

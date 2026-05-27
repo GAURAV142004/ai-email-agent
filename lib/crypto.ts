@@ -1,16 +1,17 @@
 import crypto from 'crypto'
 
 const rawKey = process.env.TOKEN_ENCRYPTION_KEY
-if (!rawKey || rawKey.length !== 32) {
+if (!rawKey || (rawKey.length !== 32 && rawKey.length !== 64)) {
   throw new Error(
-    `TOKEN_ENCRYPTION_KEY must be exactly 32 ASCII characters. Got ${rawKey?.length ?? 0}.`
+    `TOKEN_ENCRYPTION_KEY must be exactly 32 ASCII characters or 64 hex characters. Got ${rawKey?.length ?? 0}.`
   )
 }
-const SECRET = rawKey
+const keyBuffer = rawKey.length === 64 ? Buffer.from(rawKey, 'hex') : Buffer.from(rawKey, 'utf8')
+
 
 export function encryptToken(plain: string): string {
   const iv = crypto.randomBytes(16)
-  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(SECRET), iv)
+  const cipher = crypto.createCipheriv('aes-256-cbc', keyBuffer, iv)
   const encrypted = Buffer.concat([cipher.update(plain), cipher.final()])
   return iv.toString('hex') + ':' + encrypted.toString('hex')
 }
@@ -19,7 +20,7 @@ export function decryptToken(encrypted: string): string {
   const [ivHex, encHex] = encrypted.split(':')
   const decipher = crypto.createDecipheriv(
     'aes-256-cbc',
-    Buffer.from(SECRET),
+    keyBuffer,
     Buffer.from(ivHex, 'hex')
   )
   return Buffer.concat([

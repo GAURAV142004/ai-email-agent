@@ -57,6 +57,17 @@ const PERSONAL_TOPIC_PATTERNS: Array<{ topic: string; patterns: RegExp[] }> = [
       /\b(conflict with colleague|personal dispute|fight with)\b/i,
     ],
   },
+  {
+    topic: 'personal_identifiers',
+    patterns: [
+      /\b(phone|mobile|contact|cell|telephone)\s*(number|no)?\b/i,
+      /\b(home address|residential address|living address|house address)\b/i,
+      /\b(date of birth|dob|birth date|birthdate|birthday|age of|how old is)\b/i,
+      /\b(aadhaar|aadhar|pan|passport|ssn|social security|national id|voter id|id card|driving license|license number)\b/i,
+      /\b(bank account|bank details|account number|ifsc|routing number)\b/i,
+      /\b(personal email|private email|gmail address|yahoo address|outlook address)\b/i,
+    ],
+  },
 ]
 
 export function detectPersonalTopics(text: string): TopicDetectionResult {
@@ -81,4 +92,5 @@ export const TOPIC_LABELS: Record<string, string> = {
   legal_personal:          'Personal Legal Matters',
   religion_caste:          'Religion / Community',
   personal_grievance:      'Personal Grievances',
+  personal_identifiers:    'Personal Identifiers / Contact Details',
 }

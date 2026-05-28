@@ -45,6 +45,15 @@ describe('Compliance Topic Detector — Personal Identifiers', () => {
 
     const res2 = detectPersonalTopics("Send an email update regarding the dashboard deploy.")
     expect(res2.hasPersonalTopics).toBe(false)
+
+    const res3 = detectPersonalTopics("Please contact the client about the new requirements.")
+    expect(res3.hasPersonalTopics).toBe(false)
+
+    const res4 = detectPersonalTopics("Who is the primary contact for this deployment?")
+    expect(res4.hasPersonalTopics).toBe(false)
+
+    const res5 = detectPersonalTopics("We need to debug the mobile application layout.")
+    expect(res5.hasPersonalTopics).toBe(false)
   })
 })
 

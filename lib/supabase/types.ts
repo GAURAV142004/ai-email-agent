@@ -153,6 +153,8 @@ export interface EmailKnowledgeBase {
   classification_reason: string | null
   detected_project: string | null
   classification_source: ClassificationSource | null
+  embedding?: string
+  masked_full_text: string | null
   pii_was_masked: boolean
   tokens_used: number | null
   created_at: string
@@ -345,6 +347,7 @@ export interface KBSearchResult {
   similarity: number
   memberName: string
   memberRole: TeamRole
+  chunkText?:  string
 }
 
 export interface EmailAttachmentKB {

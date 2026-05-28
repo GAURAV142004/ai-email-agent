@@ -156,7 +156,7 @@ export async function fetchProjectKBHybrid(
     const queryEmbedding = await generateEmbedding(query)
     const vectorLiteral  = formatVectorLiteral(queryEmbedding)
 
-    const { data: vectorEntries } = await supabase.rpc('search_kb_by_embedding_in_project', {
+    const { data: vectorEntries } = await supabase.rpc('search_kb_chunks_by_embedding_in_project', {
       query_embedding: vectorLiteral,
       match_threshold: 0.25,
       match_count:     20,
@@ -164,12 +164,16 @@ export async function fetchProjectKBHybrid(
       cluster_id:      clusterId,
     })
 
-    const vectorResults: KBSearchResult[] = ((vectorEntries ?? []) as any[]).map(entry => ({
-      entry,
-      similarity: entry.similarity ?? 0,
-      memberName: (memberMap.get(entry.owner_member_id) as any)?.name ?? 'Unknown',
-      memberRole: ((memberMap.get(entry.owner_member_id) as any)?.role ?? 'developer') as TeamRole,
-    }))
+    const vectorResults: KBSearchResult[] = ((vectorEntries ?? []) as any[]).map(row => {
+      const { chunk_text, similarity, ...entry } = row
+      return {
+        entry,
+        similarity: similarity ?? 0,
+        memberName: (memberMap.get(entry.owner_member_id) as any)?.name ?? 'Unknown',
+        memberRole: ((memberMap.get(entry.owner_member_id) as any)?.role ?? 'developer') as TeamRole,
+        chunkText: chunk_text ?? undefined,
+      }
+    })
 
     if (!vectorResults.length) {
       return { results: fullResults, strategy: 'full' }
@@ -266,6 +270,7 @@ export function buildProjectContext(
       `Summary: ${e.summary}`,
       e.key_points?.length ? `Facts: ${(e.key_points as string[]).join(' • ')}` : null,
       actionStr             ? `Actions: ${actionStr}` : null,
+      r.chunkText           ? `Matched Detail: ${r.chunkText}` : null,
     ].filter(Boolean).join('\n')
   }).join('\n\n')
 

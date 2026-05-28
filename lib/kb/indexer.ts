@@ -8,6 +8,7 @@ import { AttachmentMeta }                                          from '@/lib/g
 import { indexAttachments }                                        from '@/lib/attachments/indexer'
 import { resolveEmailsToMemberIds, resolveThreadOwner }            from './participant-resolver'
 import { fanOutToStructuredTables }                                from './structured-fanout'
+import { maskPII }                                                 from '@/lib/pii/masker'
 
 export interface IndexEmailParams {
   memberId:       string          // the team member whose inbox is being synced
@@ -149,6 +150,9 @@ export async function indexEmailToKB(
 
   const embedding = await generateEmbedding(embeddingText)
 
+  // Mask PII from raw thread text for parent storage
+  const maskedResult = maskPII(params.threadText.slice(0, 4000))
+
   // ── Step 8: Insert KB entry ──────────────────────────────────────────────
   const { data: entry, error } = await supabase
     .from('email_knowledge_base')
@@ -157,12 +161,12 @@ export async function indexEmailToKB(
       project_cluster_id:         clusterId,
       gmail_thread_id:             params.gmailThreadId,
       gmail_message_id:            params.gmailMessageId,
-      // Participant tracking (NEW)
+      // Participant tracking
       to_emails:                   params.toEmails,
       cc_emails:                   params.ccEmails,
       participant_member_ids:      participantMemberIds,
       mentioned_persons:           summary.mentionedResponsiblePersons,
-      // Structured extraction (NEW)
+      // Structured extraction
       email_type:                  summary.emailType,
       urgency:                     summary.urgency,
       awaiting_response_from:      summary.awaitingResponseFrom,
@@ -179,7 +183,8 @@ export async function indexEmailToKB(
       detected_project:            summary.detectedProject ?? classification.detectedProject,
       classification_source:       classification.source,
       embedding:                   formatVectorLiteral(embedding),
-      pii_was_masked:              summary.piiWasMasked,
+      masked_full_text:            maskedResult.masked,
+      pii_was_masked:              summary.piiWasMasked || maskedResult.wasMasked,
       tokens_used:                 summary.tokensUsed,
     })
     .select('id')
@@ -187,6 +192,22 @@ export async function indexEmailToKB(
 
   if (error || !entry) {
     return { indexed: false, reason: `DB insert failed: ${error?.message}` }
+  }
+
+  // ── Step 8.5: Chunk & Index full text (Parent-Child) ────────────────────
+  try {
+    const chunks = chunkText(maskedResult.masked, 600, 150)
+    for (const chunk of chunks) {
+      if (!chunk.trim()) continue
+      const chunkEmbedding = await generateEmbedding(chunk)
+      await supabase.from('email_kb_chunks').insert({
+        kb_entry_id: entry.id,
+        chunk_text:  chunk,
+        embedding:   formatVectorLiteral(chunkEmbedding),
+      })
+    }
+  } catch (chunkErr: any) {
+    console.error(`[KB Chunk Indexer] Failed to chunk thread ${params.gmailThreadId}:`, chunkErr?.message)
   }
 
   // ── Step 9: Fan out to structured tables (non-critical) ─────────────────
@@ -268,4 +289,19 @@ async function upsertProjectCluster(
     .single()
 
   return created?.id ?? null
+}
+
+/** Splitting text into overlapping chunks */
+function chunkText(text: string, chunkSize: number = 600, overlap: number = 150): string[] {
+  const chunks: string[] = []
+  if (!text) return chunks
+  
+  let start = 0
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length)
+    chunks.push(text.slice(start, end))
+    if (end === text.length) break
+    start += chunkSize - overlap
+  }
+  return chunks
 }

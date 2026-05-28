@@ -2,9 +2,9 @@ import { NextResponse } from 'next/server'
 import { getMemberFromSession, getServiceSupabase } from '@/lib/auth'
 import { getGmailClient } from '@/lib/gmail/client'
 import { fetchThread } from '@/lib/gmail/thread'
-import { analyzeEmailThread } from '@/lib/ai/analyze'
-import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
 import { safeDecrypt } from '@/lib/crypto'
+import { indexEmailToKB } from '@/lib/kb/indexer'
+import type { EmailClassificationRule } from '@/lib/supabase/types'
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -43,6 +43,13 @@ export async function POST(): Promise<NextResponse> {
   const accessToken  = safeDecrypt(tokenRow.access_token)
   const refreshToken = tokenRow.refresh_token ? safeDecrypt(tokenRow.refresh_token) : undefined
 
+  // Load active classification rules
+  const { data: rulesData } = await supabase
+    .from('email_classification_rules')
+    .select('*')
+    .eq('is_active', true)
+  const rules: EmailClassificationRule[] = (rulesData as EmailClassificationRule[]) ?? []
+
   try {
     const gmail = getGmailClient(accessToken, refreshToken)
 
@@ -65,60 +72,59 @@ export async function POST(): Promise<NextResponse> {
       if (threadsSeen.has(threadId)) continue
       threadsSeen.add(threadId)
 
-      // Skip if this gmail_message_id already in personal_inbox_emails for this member
+      // Skip if this thread is already indexed globally and the member is already a participant
       const { data: existing } = await supabase
-        .from('personal_inbox_emails')
-        .select('id')
-        .eq('member_id', member.id)
-        .eq('gmail_message_id', messageId)
+        .from('email_knowledge_base')
+        .select('id, participant_member_ids')
+        .eq('gmail_thread_id', threadId)
         .maybeSingle()
 
-      if (existing) { skipped++; continue }
+      if (existing) {
+        const currentParticipants = (existing.participant_member_ids as string[]) ?? []
+        if (currentParticipants.includes(member.id)) {
+          skipped++
+          continue
+        }
+      }
 
       try {
         const thread = await fetchThread(threadId, accessToken, refreshToken)
 
-        const rawFrom  = thread.messages[0]?.from ?? ''
-        const fromEmail = extractEmailAddress(rawFrom) || thread.fromEmail
-        const fromName  = extractFromName(rawFrom)
-        const snippet   = thread.fullText.slice(0, 500)
+        const firstMsgId = thread.messages[0]?.messageId ?? ''
+        const rawFrom    = thread.messages[0]?.from ?? ''
+        const fromEmail  = extractEmailAddress(rawFrom) || thread.fromEmail
+        const snippet    = thread.fullText.slice(0, 500)
 
-        // Pre-filter: skip automated/newsletter emails
-        const preFilter = shouldSkipAIAnalysis(fromEmail, thread.subject, snippet)
-        if (preFilter.skip) {
-          skipped++
-          continue
-        }
-
-        // Analyse with AI (summary, priority, isActionable)
-        const analysis = await analyzeEmailThread(thread.fullText, thread.subject)
-
-        const expiresAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
-
-        await supabase.from('personal_inbox_emails').insert({
-          member_id:       member.id,
-          gmail_thread_id: threadId,
-          gmail_message_id: messageId,
-          subject:         thread.subject,
-          from_email:      fromEmail,
-          from_name:       fromName || null,
-          snippet:         snippet || null,
-          received_at:     thread.receivedAt,
-          is_read:         false,
-          ai_summary:      analysis.summary,
-          ai_priority:     analysis.priority,
-          is_actionable:   analysis.requiresAction,
-          reply_sent:      false,
-          expires_at:      expiresAt,
+        const kbResult = await indexEmailToKB(supabase, rules, {
+          memberId:       member.id,
+          gmailThreadId:  threadId,
+          gmailMessageId: firstMsgId,
+          fromEmail,
+          toEmail:        member.email,
+          toEmails:       thread.toEmails,
+          ccEmails:       thread.ccEmails,
+          subject:        thread.subject,
+          threadText:     thread.fullText,
+          snippet,
+          emailDate:      thread.receivedAt,
+          direction:      'inbound',
+          attachments:    thread.attachments,
+          accessToken,
+          refreshToken,
         })
 
-        processed++
+        if (kbResult.indexed || kbResult.merged) {
+          processed++
+          // Throttle AI calls to avoid Bedrock rate limits (only when actually indexing/analyzing)
+          if (kbResult.indexed) {
+            await sleep(500)
+          }
+        } else {
+          skipped++
+        }
       } catch (err) {
         console.error(`[Gmail Sync] Failed to process thread ${threadId}:`, err)
       }
-
-      // Throttle AI calls to avoid Bedrock rate limits
-      await sleep(500)
     }
 
     return NextResponse.json({ ok: true, processed, skipped })

@@ -2,8 +2,6 @@ import { SupabaseClient } from '@supabase/supabase-js'
 import { getServiceSupabase } from '@/lib/auth'
 import { fetchThread } from '@/lib/gmail/thread'
 import { indexEmailToKB } from './indexer'
-import { analyzeEmailThread } from '@/lib/ai/analyze'
-import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
 import { safeDecrypt } from '@/lib/crypto'
 import type { EmailClassificationRule } from '@/lib/supabase/types'
 
@@ -231,45 +229,8 @@ export async function drainQueueBatch(
         errors.push(`KB ${threadId}: ${kbErr?.message ?? 'unknown'}`)
       }
 
-      // PATH B: Personal inbox
-      let personalAdded = false
-      const { data: existingPersonal } = await supabase
-        .from('personal_inbox_emails')
-        .select('id')
-        .eq('member_id', memberId)
-        .eq('gmail_message_id', firstMsgId)
-        .maybeSingle()
-
-      if (!existingPersonal) {
-        const snippet   = thread.fullText.slice(0, 500)
-        const preFilter = shouldSkipAIAnalysis(fromEmail, thread.subject, snippet)
-
-        if (!preFilter.skip) {
-          try {
-            const analysis = await analyzeEmailThread(thread.fullText, thread.subject)
-            await supabase.from('personal_inbox_emails').insert({
-              member_id:        memberId,
-              gmail_thread_id:  threadId,
-              gmail_message_id: firstMsgId,
-              subject:          thread.subject,
-              from_email:       fromEmail,
-              from_name:        fromName || null,
-              snippet:          snippet || null,
-              received_at:      thread.receivedAt,
-              is_read:          false,
-              ai_summary:       analysis.summary,
-              ai_priority:      analysis.priority,
-              is_actionable:    analysis.requiresAction,
-              reply_sent:       false,
-              expires_at:       new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString(),
-            })
-            personalAdded = true
-          } catch (aiErr: any) {
-            console.error(`[Queue] Inbox AI analysis error for thread ${threadId}:`, aiErr)
-            errors.push(`Inbox ${threadId}: ${aiErr?.message ?? 'unknown'}`)
-          }
-        }
-      }
+      // Path B (Personal Inbox) omitted to focus exclusively on Plan A (Global Knowledge Base)
+      const personalAdded = false
 
       // Update queue item to completed
       await supabase

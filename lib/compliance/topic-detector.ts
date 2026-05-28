@@ -60,7 +60,7 @@ const PERSONAL_TOPIC_PATTERNS: Array<{ topic: string; patterns: RegExp[] }> = [
   {
     topic: 'personal_identifiers',
     patterns: [
-      /\b(phone|mobile|contact|cell|telephone)\s*(number|no)?\b/i,
+      /\b(phone|mobile|cell|telephone|contact)\s+(?:number|no|details|digits|info)\b/i,
       /\b(home address|residential address|living address|house address)\b/i,
       /\b(date of birth|dob|birth date|birthdate|birthday|age of|how old is)\b/i,
       /\b(aadhaar|aadhar|pan|passport|ssn|social security|national id|voter id|id card|driving license|license number)\b/i,

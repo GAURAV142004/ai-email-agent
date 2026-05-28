@@ -1,9 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest, NextResponse, after } from 'next/server'
 import { getServiceSupabase } from '@/lib/auth'
 import { safeDecrypt } from '@/lib/crypto'
 import { fetchThread, fetchNewMessages } from '@/lib/gmail/thread'
-import { analyzeEmailThread } from '@/lib/ai/analyze'
-import { shouldSkipAIAnalysis } from '@/lib/ai/pre-filter'
 import { indexEmailToKB } from '@/lib/kb/indexer'
 import type { EmailClassificationRule } from '@/lib/supabase/types'
 
@@ -138,48 +136,7 @@ async function processWebhookDualPath(notification: PubSubMessage): Promise<void
         console.error(`[Webhook] KB indexing failed for thread ${threadId}:`, kbErr)
       }
 
-      // ── PATH B: Personal inbox ────────────────────────────────────────────
-      // Check if already stored
-      const { data: existingPersonal } = await supabase
-        .from('personal_inbox_emails')
-        .select('id')
-        .eq('member_id', member.id)
-        .eq('gmail_message_id', firstMsgId)
-        .maybeSingle()
-
-      if (existingPersonal) continue
-
-      // Pre-filter automated/newsletter senders
-      const preFilter = shouldSkipAIAnalysis(fromEmail, thread.subject, snippet)
-      if (preFilter.skip) continue
-
-      // AI analysis for personal inbox
-      let analysis: Awaited<ReturnType<typeof analyzeEmailThread>>
-      try {
-        analysis = await analyzeEmailThread(thread.fullText, thread.subject)
-      } catch (aiErr) {
-        console.error(`[Webhook] AI analysis failed for thread ${threadId}:`, aiErr)
-        continue
-      }
-
-      const expiresAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString()
-
-      await supabase.from('personal_inbox_emails').insert({
-        member_id:        member.id,
-        gmail_thread_id:  threadId,
-        gmail_message_id: firstMsgId,
-        subject:          thread.subject,
-        from_email:       fromEmail,
-        from_name:        fromName || null,
-        snippet:          snippet || null,
-        received_at:      thread.receivedAt,
-        is_read:          false,
-        ai_summary:       analysis.summary,
-        ai_priority:      analysis.priority,
-        is_actionable:    analysis.requiresAction,
-        reply_sent:       false,
-        expires_at:       expiresAt,
-      })
+      // Path B (Personal Inbox) omitted to focus exclusively on Plan A (Global Knowledge Base)
     } catch (err) {
       console.error(`[Webhook] Failed to process thread ${threadId}:`, err)
     }
@@ -213,9 +170,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false }, { status: 200 })
   }
 
-  // Fire-and-forget: fast ACK, process asynchronously
-  processWebhookDualPath(notification).catch(() => {
-    // Errors logged inside processWebhookDualPath
+  // Fast ACK, process asynchronously utilizing after() to preserve serverless container lifespan
+  after(async () => {
+    try {
+      await processWebhookDualPath(notification)
+    } catch (err) {
+      console.error('[Webhook] Background process error:', err)
+    }
   })
 
   return NextResponse.json({ ok: true })

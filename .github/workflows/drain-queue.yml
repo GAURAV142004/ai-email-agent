@@ -1,0 +1,16 @@
+name: Drain Sync Queue
+
+on:
+  schedule:
+    - cron: '*/10 * * * *' # Triggers every 10 minutes (approximate)
+  workflow_dispatch: {} # Allows manual triggering from the GitHub Actions tab
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Queue Drain API
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://ai-intellegent-agent.vercel.app/api/cron/kb-sync"

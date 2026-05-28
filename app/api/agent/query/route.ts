@@ -308,16 +308,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (cached) {
       console.log(`[Semantic Cache] Hit for: "${question}"`)
       
+      const availableClusters = await fetchAllProjectClusters(supabase, member.role as TeamRole, member.id)
+      const detected = detectProjectInQuery(question, availableClusters)
+      const focus = detected ? detected.name : null
+
       let convId = conversationId
       if (!convId) {
         const { data: conv } = await supabase
           .from('agent_conversations')
-          .insert({ member_id: member.id, title: question.slice(0, 70) })
+          .insert({ member_id: member.id, title: question.slice(0, 70), project_focus: focus })
           .select('id').single()
         convId = conv?.id
       } else {
         await supabase.from('agent_conversations')
-          .update({ updated_at: new Date().toISOString() })
+          .update({ updated_at: new Date().toISOString(), project_focus: focus })
           .eq('id', convId).eq('member_id', member.id)
       }
 
@@ -340,8 +344,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           .select('id').single()
         messageId = aMsg?.id
       }
-
-      const availableClusters = await fetchAllProjectClusters(supabase, member.role as TeamRole, member.id)
 
       await logKBQuery(supabase, {
         queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id,
@@ -368,10 +370,18 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // ── Load history + visible members + all project clusters ───────────────────
-  const [history, { ids: memberIds, map: memberMap }, availableClusters] = await Promise.all([
+  const [history, { ids: memberIds, map: memberMap }, availableClusters, dbProjectFocus] = await Promise.all([
     conversationId ? fetchHistory(supabase, conversationId) : Promise.resolve([] as HistoryMsg[]),
     resolveVisibleMembers(supabase, member.role as TeamRole),
     fetchAllProjectClusters(supabase, member.role as TeamRole, member.id),
+    conversationId
+      ? supabase
+          .from('agent_conversations')
+          .select('project_focus')
+          .eq('id', conversationId)
+          .maybeSingle()
+          .then(({ data }) => data?.project_focus ?? null)
+      : Promise.resolve(null),
   ])
 
   if (!memberIds.length) {
@@ -382,10 +392,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     })
   }
 
-  const isAggregation = isAggregationQuery(question)
+  const isSingularProject = (
+    (question.toLowerCase().includes('our project') ||
+     question.toLowerCase().includes('the project') ||
+     question.toLowerCase().includes('my project') ||
+     question.toLowerCase().includes('this project') ||
+     question.toLowerCase().includes('status of project')) &&
+    !question.toLowerCase().includes('all project') &&
+    !question.toLowerCase().includes('across project')
+  )
+  const isAggregation = isAggregationQuery(question) && !isSingularProject
   const isSpecific    = isSpecificQuery(question)
 
-  // ── Project detection (query → history → hint from UI → null) ──────────────
+  // ── Project detection (query → history → hint from UI → DB focus → null) ────
   let detectedProject: ProjectCluster | null = null
 
   // 1. If frontend sends an explicit cluster ID (user clicked a project chip)
@@ -401,6 +420,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // 3. Try to resolve from conversation history
   if (!detectedProject && history.length > 0) {
     detectedProject = detectProjectInHistory(history, availableClusters)
+  }
+
+  // 4. Try to resolve from the database conversation project focus
+  if (!detectedProject && dbProjectFocus) {
+    detectedProject = availableClusters.find(
+      c => c.id === dbProjectFocus || c.name.toLowerCase() === dbProjectFocus.toLowerCase(),
+    ) ?? null
   }
 
   // ── Decision: Ask clarifying question? ─────────────────────────────────────
@@ -595,12 +621,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!convId) {
     const { data: conv } = await supabase
       .from('agent_conversations')
-      .insert({ member_id: member.id, title: question.slice(0, 70) })
+      .insert({
+        member_id: member.id,
+        title: question.slice(0, 70),
+        project_focus: detectedProject ? detectedProject.name : null,
+      })
       .select('id').single()
     convId = conv?.id
   } else {
     await supabase.from('agent_conversations')
-      .update({ updated_at: new Date().toISOString() })
+      .update({
+        updated_at: new Date().toISOString(),
+        project_focus: detectedProject ? detectedProject.name : null,
+      })
       .eq('id', convId).eq('member_id', member.id)
   }
 

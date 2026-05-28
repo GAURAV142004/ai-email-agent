@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSession } from 'next-auth/react'
 import Link from 'next/link'
 import {
@@ -111,6 +111,7 @@ export default function SettingsPage() {
   const [kbEntryCount, setKbEntryCount] = useState<number | null>(null)
   const [kbSyncErrors, setKbSyncErrors] = useState<string[]>([])
   const [bootstrapDays, setBootstrapDays] = useState<number>(90)
+  const [kbQueueRemaining, setKbQueueRemaining] = useState<number | null>(null)
 
   // Live sync progress
   type KBProgress = {
@@ -144,17 +145,32 @@ export default function SettingsPage() {
       .catch(() => setWatchStatus('none'))
   }, [])
 
-  // Load member stats (KB sync time + entry count)
-  useEffect(() => {
+  const loadStats = useCallback(() => {
     fetch('/api/me/stats')
       .then((r) => r.json())
       .then((data) => {
         if (data.kbSync?.lastSyncAt)        setLastKbSync(data.kbSync.lastSyncAt)
         if (data.kbSync?.totalKBEntries != null) setKbEntryCount(data.kbSync.totalKBEntries)
         if (data.kbSync?.lastSyncErrors?.length) setKbSyncErrors(data.kbSync.lastSyncErrors)
+        if (data.kbSync?.queueRemaining != null) setKbQueueRemaining(data.kbSync.queueRemaining)
       })
       .catch(() => {})
   }, [])
+
+  // Load member stats (KB sync time + entry count)
+  useEffect(() => {
+    loadStats()
+  }, [loadStats])
+
+  // Poll stats while items are in queue
+  useEffect(() => {
+    if (kbQueueRemaining !== null && kbQueueRemaining > 0) {
+      const interval = setInterval(() => {
+        loadStats()
+      }, 8000) // check every 8 seconds for fast real-time feedback
+      return () => clearInterval(interval)
+    }
+  }, [kbQueueRemaining, loadStats])
 
   async function handleActivateWatch() {
     setWatchStatus('setting-up')
@@ -186,6 +202,7 @@ export default function SettingsPage() {
         const n = data.synced ?? data.emails_synced ?? 0
         setSyncMsg(`Synced ${n} email${n !== 1 ? 's' : ''}.`)
         setLastSync(new Date().toISOString())
+        loadStats()
       } else {
         setSyncMsg(data.error ?? 'Sync failed.')
       }
@@ -243,6 +260,7 @@ export default function SettingsPage() {
               )
               setLastKbSync(new Date().toISOString())
               setKbProgress(null)
+              loadStats()
 
             } else if (update.type === 'member_start') {
               setKbProgress({
@@ -412,6 +430,12 @@ export default function SettingsPage() {
                 {kbEntryCount === 0 && (
                   <span className="text-amber-600 dark:text-amber-400 font-medium">— Run Bootstrap to populate</span>
                 )}
+              </div>
+            )}
+            {kbQueueRemaining !== null && kbQueueRemaining > 0 && (
+              <div className="flex items-center gap-1.5 text-xs bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900/40 px-2.5 py-1 rounded-full font-medium">
+                <RefreshCw className="w-3.5 h-3.5 text-amber-500 animate-spin shrink-0" />
+                <span>{kbQueueRemaining.toLocaleString()} remaining in sync queue</span>
               </div>
             )}
             {lastKbSync && (

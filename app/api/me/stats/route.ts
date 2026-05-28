@@ -58,6 +58,13 @@ export async function GET(): Promise<NextResponse> {
     .select('id', { count: 'exact', head: true })
     .eq('owner_member_id', member.id)
 
+  // Pending items in bootstrap queue for this member
+  const { count: queueCount } = await supabase
+    .from('kb_bootstrap_queue')
+    .select('id', { count: 'exact', head: true })
+    .eq('member_id', member.id)
+    .in('status', ['pending', 'processing'])
+
   return NextResponse.json({
     inbox:   inboxStats,
     todos:   todoStats,
@@ -66,6 +73,7 @@ export async function GET(): Promise<NextResponse> {
       lastEntriesAdded: lastSync?.kb_entries_added ?? 0,
       lastSyncErrors:   (lastSync?.errors as string[] | null) ?? [],
       totalKBEntries:   kbCount ?? 0,
+      queueRemaining:   queueCount ?? 0,
     },
   })
 }

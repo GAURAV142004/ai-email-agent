@@ -83,6 +83,29 @@ const FILE_RX = [
 ]
 const wantsFile = (t: string) => FILE_RX.some(p => p.test(t))
 
+// ── Obvious personal-question pre-filter ─────────────────────────────────────
+// Catches the most blatant personal queries before any KB lookup or AI call.
+// These keywords are almost exclusively personal in intent when used in a
+// question context, so the false-positive risk is extremely low.
+const OBVIOUS_PERSONAL_RX = [
+  /\b(salary|ctc|cost.?to.?company|compensation|stipend|take.?home|remuneration)\b/i,
+  /\bwhat\s+(does|did|is|was)\b.{0,30}\b(earn|make|paid|getting|drawing|taking home)\b/i,
+  /\bhow much\s+(does|did|is|was)\b.{0,30}\b(earn|make|paid|get paid|drawing)\b/i,
+  /\bhow old\s+(is|was|are)\b/i,
+  /\bwhat.*\b(his|her|their)\s+age\b/i,
+  /\bwhere\s+(does|do|did|is|was)\b.{0,30}\b(live|stay|reside|based|located)\b/i,
+  /\b(home address|residential address|personal address|house address)\b/i,
+  /\b(hobbies|personal interests|lifestyle|habits)\b.{0,30}\b(of|his|her|their)\b/i,
+  /\b(his|her|their)\s+(hobbies|interests|lifestyle|habits|passions)\b/i,
+  /\bwhat\s+(religion|caste|community)\b/i,
+  /\b(his|her|their)\s+(religion|caste|community|faith)\b/i,
+  /\b(his|her|their)\s+(family|kids|children|wife|husband|girlfriend|boyfriend|parents|siblings)\b/i,
+  /\b(does|did)\s+\w+\s+(have|has)\s+(kids|children|a wife|a husband|siblings)\b/i,
+  /\btell me (something )?(personal|private) about\b/i,
+  /\bwhat (do you know|can you tell me|is there) about\s+(him|her|them)\b/i,
+]
+const isObviousPersonalQuery = (t: string) => OBVIOUS_PERSONAL_RX.some(p => p.test(t))
+
 // ── Bedrock call wrapper ──────────────────────────────────────────────────────
 async function callAI(
   messages:   Array<{ role: string; content: Array<{ text: string }> }>,
@@ -162,8 +185,26 @@ ${projectScope}
 - No filler: "In summary", "Overall", "Moving forward".
 - If nothing relevant in KB → state clearly and ask ONE specific clarifying question.
 
-=== SCOPE ===
-Project and work information only. Redirect personal queries back to project topics.${fileBlock}`
+=== SCOPE — HARD RULES (non-negotiable) ===
+You ONLY answer questions about project work: tasks, deadlines, decisions, blockers,
+status updates, deliverables, meeting notes, and technical discussions.
+
+You MUST REFUSE — with no exceptions — any question that is personal in nature,
+including but not limited to:
+  • Salary, CTC, compensation, earnings, or pay of any team member
+  • Age, date of birth, or personal demographics
+  • Home address, city, location, or where someone lives
+  • Health, illness, medical leave, or personal absence reasons
+  • Relationships (married/single/divorced/dating/family)
+  • Hobbies, lifestyle, personal interests, or habits
+  • Religion, caste, community, or faith
+  • Any private or personal attribute of a team member
+
+When a personal question is detected, respond with EXACTLY this message and nothing else:
+"I'm only able to assist with project-related questions. Personal information about team members is outside the scope of this system."
+
+Do NOT say "I don't have that in the knowledge base" for personal questions — that
+implies the data might exist. Use the exact refusal text above instead.${fileBlock}`
 
   const msgs: Array<{ role: string; content: Array<{ text: string }> }> = []
 
@@ -277,6 +318,29 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   if (!question) return NextResponse.json({ error: 'question is required' }, { status: 400 })
   if (question.length > 2000) return NextResponse.json({ error: 'Question too long' }, { status: 400 })
+
+  // ── Fix 4: Obvious personal-question pre-filter ─────────────────────────────
+  // Block the most blatant personal queries immediately, before any DB/AI work.
+  // This ensures they get a 🚫 compliance alert + audit log, not a "not in KB" reply.
+  if (isObviousPersonalQuery(question)) {
+    const supabaseEarly = getServiceSupabase()
+    await logKBQuery(supabaseEarly, {
+      queriedBy: member.id,
+      queryText: question,
+      wasBlocked: true,
+      blockReason: 'obvious_personal_query_pre_filter',
+      personalTopicsFound: ['obvious_personal_intent'],
+    })
+    return NextResponse.json({
+      answer: '🚫 Compliance Block: This question asks for personal information about a team member (e.g. salary, location, age, relationships, hobbies, religion). Personal attributes are strictly outside the scope of the project knowledge base. This attempt has been logged.',
+      wasBlocked: true,
+      responseType: 'text',
+      kbEntriesUsed: 0,
+      projectClusters: [],
+      projectClusterDetails: [],
+      tokensUsed: 0,
+    })
+  }
 
   const supabase = getServiceSupabase()
 

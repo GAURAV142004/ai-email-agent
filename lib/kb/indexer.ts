@@ -13,7 +13,8 @@ import { maskPII }                                                 from '@/lib/p
 export interface IndexEmailParams {
   memberId:       string          // the team member whose inbox is being synced
   gmailThreadId:  string
-  gmailMessageId: string
+  gmailMessageId: string          // first message ID of the thread
+  latestMessageId?: string        // latest message ID in the thread
   fromEmail:      string
   toEmail:        string          // primary To (legacy — kept for classification)
   toEmails:       string[]        // all To recipients from header
@@ -65,25 +66,32 @@ export async function indexEmailToKB(
   // Check by gmail_thread_id ONLY (no owner filter) — thread is now globally unique.
   const { data: existing } = await supabase
     .from('email_knowledge_base')
-    .select('id, participant_member_ids')
+    .select('id, participant_member_ids, gmail_message_id')
     .eq('gmail_thread_id', params.gmailThreadId)
     .maybeSingle()
 
+  const latestMsgId = params.latestMessageId || params.gmailMessageId
+
   if (existing) {
-    // Thread already indexed. Just add this member to participant_member_ids if not already there.
-    const current = (existing.participant_member_ids as string[]) ?? []
-    if (!current.includes(params.memberId)) {
-      await supabase
-        .from('email_knowledge_base')
-        .update({ participant_member_ids: [...current, params.memberId] })
-        .eq('id', existing.id)
+    // If the latest message ID matches what we have in the DB, this thread has no updates.
+    // Just ensure the member is a participant, and we can skip re-indexing.
+    if (existing.gmail_message_id === latestMsgId) {
+      const current = (existing.participant_member_ids as string[]) ?? []
+      if (!current.includes(params.memberId)) {
+        await supabase
+          .from('email_knowledge_base')
+          .update({ participant_member_ids: [...current, params.memberId] })
+          .eq('id', existing.id)
+      }
+      return {
+        indexed: false,
+        merged:  true,
+        reason:  'Thread already in KB — merged participant',
+        kbEntryId: existing.id,
+      }
     }
-    return {
-      indexed: false,
-      merged:  true,
-      reason:  'Thread already in KB — merged participant',
-      kbEntryId: existing.id,
-    }
+    // If they differ, it means a new email has arrived in this thread. We fall through to re-index it.
+    console.log(`[Indexer] Thread ${params.gmailThreadId} has new messages. Stored: ${existing.gmail_message_id}, latest: ${latestMsgId}. Updating KB entry...`)
   }
 
   // ── Step 3: Classify ─────────────────────────────────────────────────────
@@ -153,55 +161,79 @@ export async function indexEmailToKB(
   // Mask PII from raw thread text for parent storage
   const maskedResult = maskPII(params.threadText.slice(0, 4000))
 
-  // ── Step 8: Insert KB entry ──────────────────────────────────────────────
-  const { data: entry, error } = await supabase
-    .from('email_knowledge_base')
-    .insert({
-      owner_member_id:            ownerMemberId,
-      project_cluster_id:         clusterId,
-      gmail_thread_id:             params.gmailThreadId,
-      gmail_message_id:            params.gmailMessageId,
-      // Participant tracking
-      to_emails:                   params.toEmails,
-      cc_emails:                   params.ccEmails,
-      participant_member_ids:      participantMemberIds,
-      mentioned_persons:           summary.mentionedResponsiblePersons,
-      // Structured extraction
-      email_type:                  summary.emailType,
-      urgency:                     summary.urgency,
-      awaiting_response_from:      summary.awaitingResponseFrom,
-      decisions_made:              summary.decisionsMade,
-      // Core KB fields
-      summary:                     summary.summary,
-      key_points:                  summary.keyPoints,
-      action_items:                summary.actionItems,
-      participant_domains:         summary.participantDomains,
-      direction:                   params.direction,
-      email_date:                  params.emailDate,
-      classification_confidence:   classification.confidence,
-      classification_reason:       classification.reason,
-      detected_project:            summary.detectedProject ?? classification.detectedProject,
-      classification_source:       classification.source,
-      embedding:                   formatVectorLiteral(embedding),
-      masked_full_text:            maskedResult.masked,
-      pii_was_masked:              summary.piiWasMasked || maskedResult.wasMasked,
-      tokens_used:                 summary.tokensUsed,
-    })
-    .select('id')
-    .single()
+  // ── Step 8: Save KB entry (Insert or Update) ──────────────────────────────
+  let entryId = existing?.id
+  let dbError: any = null
 
-  if (error || !entry) {
-    return { indexed: false, reason: `DB insert failed: ${error?.message}` }
+  const kbData = {
+    owner_member_id:            ownerMemberId,
+    project_cluster_id:         clusterId,
+    gmail_thread_id:             params.gmailThreadId,
+    gmail_message_id:            latestMsgId, // Store the latest message ID!
+    // Participant tracking
+    to_emails:                   params.toEmails,
+    cc_emails:                   params.ccEmails,
+    participant_member_ids:      participantMemberIds,
+    mentioned_persons:           summary.mentionedResponsiblePersons,
+    // Structured extraction
+    email_type:                  summary.emailType,
+    urgency:                     summary.urgency,
+    awaiting_response_from:      summary.awaitingResponseFrom,
+    decisions_made:              summary.decisionsMade,
+    // Core KB fields
+    summary:                     summary.summary,
+    key_points:                  summary.keyPoints,
+    action_items:                summary.actionItems,
+    participant_domains:         summary.participantDomains,
+    direction:                   params.direction,
+    email_date:                  params.emailDate,
+    classification_confidence:   classification.confidence,
+    classification_reason:       classification.reason,
+    detected_project:            summary.detectedProject ?? classification.detectedProject,
+    classification_source:       classification.source,
+    embedding:                   formatVectorLiteral(embedding),
+    masked_full_text:            maskedResult.masked,
+    pii_was_masked:              summary.piiWasMasked || maskedResult.wasMasked,
+    tokens_used:                 summary.tokensUsed,
+    updated_at:                  new Date().toISOString(),
+  }
+
+  if (existing) {
+    const { error } = await supabase
+      .from('email_knowledge_base')
+      .update(kbData)
+      .eq('id', existing.id)
+    dbError = error
+  } else {
+    const { data, error } = await supabase
+      .from('email_knowledge_base')
+      .insert(kbData)
+      .select('id')
+      .single()
+    dbError = error
+    if (data) entryId = data.id
+  }
+
+  if (dbError || !entryId) {
+    return { indexed: false, reason: `DB save failed: ${dbError?.message}` }
   }
 
   // ── Step 8.5: Chunk & Index full text (Parent-Child) ────────────────────
   try {
+    if (existing) {
+      // Delete old chunks for this entry before re-chunking
+      await supabase
+        .from('email_kb_chunks')
+        .delete()
+        .eq('kb_entry_id', entryId)
+    }
+
     const chunks = chunkText(maskedResult.masked, 600, 150)
     for (const chunk of chunks) {
       if (!chunk.trim()) continue
       const chunkEmbedding = await generateEmbedding(chunk)
       await supabase.from('email_kb_chunks').insert({
-        kb_entry_id: entry.id,
+        kb_entry_id: entryId,
         chunk_text:  chunk,
         embedding:   formatVectorLiteral(chunkEmbedding),
       })
@@ -213,7 +245,7 @@ export async function indexEmailToKB(
   // ── Step 9: Fan out to structured tables (non-critical) ─────────────────
   try {
     await fanOutToStructuredTables(supabase, {
-      kbEntryId:        entry.id,
+      kbEntryId:        entryId,
       projectClusterId: clusterId,
       gmailThreadId:    params.gmailThreadId,
       emailDate:        params.emailDate,
@@ -230,7 +262,7 @@ export async function indexEmailToKB(
     try {
       await indexAttachments(
         supabase,
-        entry.id,
+        entryId,
         ownerMemberId,
         params.gmailThreadId,
         params.emailDate,
@@ -243,7 +275,7 @@ export async function indexEmailToKB(
     }
   }
 
-  return { indexed: true, reason: 'Indexed successfully', kbEntryId: entry.id }
+  return { indexed: true, reason: 'Indexed successfully', kbEntryId: entryId }
 }
 
 // ── Upsert project cluster ────────────────────────────────────────────────────

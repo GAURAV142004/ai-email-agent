@@ -3,6 +3,7 @@ import GoogleProvider from 'next-auth/providers/google'
 import { createClient } from '@supabase/supabase-js'
 import { TeamRole } from '@/lib/roles'
 import { encryptToken } from '@/lib/crypto'
+import { setupGmailWatch } from '@/lib/gmail/watch'
 
 function getServiceClient() {
   return createClient(
@@ -146,6 +147,14 @@ export const authOptions: NextAuthOptions = {
             .update({ supabase_uid: String(userData.id) })
             .eq('email', user.email)
             .is('supabase_uid', null)
+
+          // Automatically set up or renew Gmail Watch during sign-in
+          try {
+            await setupGmailWatch(supabase, member.id, account.access_token, account.refresh_token ?? undefined)
+            console.log(`[Auth] Automatically registered/renewed Gmail watch for ${user.email}`)
+          } catch (watchErr) {
+            console.error('[Auth] Auto Gmail watch registration failed:', watchErr)
+          }
         }
 
         return true

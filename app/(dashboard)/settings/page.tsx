@@ -99,16 +99,15 @@ export default function SettingsPage() {
   const [watchExpiry, setWatchExpiry] = useState<string | null>(null)
   const [watchMsg, setWatchMsg] = useState<string | null>(null)
 
-  // Sync state
-  const [syncing, setSyncing] = useState(false)
-  const [syncMsg, setSyncMsg] = useState<string | null>(null)
-  const [lastSync, setLastSync] = useState<string | null>(null)
+
 
   // KB sync state
   const [kbSyncing, setKbSyncing] = useState(false)
   const [kbMsg, setKbMsg] = useState<string | null>(null)
   const [lastKbSync, setLastKbSync] = useState<string | null>(null)
   const [kbEntryCount, setKbEntryCount] = useState<number | null>(null)
+  const [kbTotalFetched, setKbTotalFetched] = useState<number | null>(null)
+  const [lastKbAdded, setLastKbAdded] = useState<number | null>(null)
   const [kbSyncErrors, setKbSyncErrors] = useState<string[]>([])
   const [bootstrapDays, setBootstrapDays] = useState<number>(90)
   const [kbQueueRemaining, setKbQueueRemaining] = useState<number | null>(null)
@@ -140,7 +139,6 @@ export default function SettingsPage() {
         } else {
           setWatchStatus('none')
         }
-        if (data.last_sync) setLastSync(data.last_sync)
       })
       .catch(() => setWatchStatus('none'))
   }, [])
@@ -149,8 +147,10 @@ export default function SettingsPage() {
     fetch('/api/me/stats')
       .then((r) => r.json())
       .then((data) => {
-        if (data.kbSync?.lastSyncAt)        setLastKbSync(data.kbSync.lastSyncAt)
+        if (data.kbSync?.lastSyncAt)           setLastKbSync(data.kbSync.lastSyncAt)
         if (data.kbSync?.totalKBEntries != null) setKbEntryCount(data.kbSync.totalKBEntries)
+        if (data.kbSync?.totalEmailsFetched != null) setKbTotalFetched(data.kbSync.totalEmailsFetched)
+        if (data.kbSync?.lastEntriesAdded != null)   setLastKbAdded(data.kbSync.lastEntriesAdded)
         if (data.kbSync?.lastSyncErrors?.length) setKbSyncErrors(data.kbSync.lastSyncErrors)
         if (data.kbSync?.queueRemaining != null) setKbQueueRemaining(data.kbSync.queueRemaining)
       })
@@ -192,26 +192,7 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleSyncNow() {
-    setSyncing(true)
-    setSyncMsg(null)
-    try {
-      const res = await fetch('/api/gmail/sync', { method: 'POST' })
-      const data = await res.json()
-      if (res.ok) {
-        const n = data.synced ?? data.emails_synced ?? 0
-        setSyncMsg(`Synced ${n} email${n !== 1 ? 's' : ''}.`)
-        setLastSync(new Date().toISOString())
-        loadStats()
-      } else {
-        setSyncMsg(data.error ?? 'Sync failed.')
-      }
-    } catch {
-      setSyncMsg('Sync failed — network error.')
-    } finally {
-      setSyncing(false)
-    }
-  }
+
 
   async function handleKbSync(bootstrap = false) {
     setKbSyncing(true)
@@ -378,31 +359,7 @@ export default function SettingsPage() {
                 </>
               )}
             </Button>
-
-            <Button
-              onClick={handleSyncNow}
-              disabled={syncing}
-              variant="outline"
-              className="gap-2 rounded-xl text-sm h-9 border-slate-200 dark:border-slate-700"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing…' : 'Sync Now'}
-            </Button>
           </div>
-
-          {/* Sync feedback */}
-          {syncMsg && (
-            <p className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-              {syncMsg}
-            </p>
-          )}
-          {lastSync && (
-            <p className="text-xs text-slate-400 flex items-center gap-1.5">
-              <Clock className="w-3 h-3" />
-              Last synced: {new Date(lastSync).toLocaleString()}
-            </p>
-          )}
         </SectionCard>
 
         {/* ── Section 2: Knowledge Base Sync ──────────────────────────────── */}
@@ -421,17 +378,41 @@ export default function SettingsPage() {
           </p>
 
           {/* KB status row */}
-          <div className="flex flex-wrap items-center gap-4">
+          <div className="space-y-3">
             {kbEntryCount !== null && (
-              <div className="flex items-center gap-1.5 text-xs">
-                <Database className="w-3.5 h-3.5 text-violet-500" />
-                <span className="font-semibold text-violet-600 dark:text-violet-400">{kbEntryCount}</span>
-                <span className="text-slate-400">emails indexed</span>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-1.5">
+                    <Database className="w-3.5 h-3.5 text-violet-500" />
+                    <span className="font-semibold text-violet-600 dark:text-violet-400">{kbEntryCount}</span>
+                    <span className="text-slate-500 dark:text-slate-400">emails in knowledge base</span>
+                    {kbTotalFetched !== null && kbTotalFetched > 0 && (
+                      <span className="text-slate-400 dark:text-slate-500">
+                        ({Math.round((kbEntryCount / kbTotalFetched) * 100)}% of {kbTotalFetched} fetched)
+                      </span>
+                    )}
+                  </div>
+                  {lastKbAdded !== null && lastKbAdded > 0 && (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">+{lastKbAdded} last sync</span>
+                  )}
+                </div>
+
+                {/* Progress bar: KB indexed vs total fetched */}
+                {kbTotalFetched !== null && kbTotalFetched > 0 && (
+                  <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                    <div
+                      className="bg-violet-500 h-1.5 rounded-full transition-all"
+                      style={{ width: `${Math.min(100, Math.round((kbEntryCount / kbTotalFetched) * 100))}%` }}
+                    />
+                  </div>
+                )}
+
                 {kbEntryCount === 0 && (
-                  <span className="text-amber-600 dark:text-amber-400 font-medium">— Run Bootstrap to populate</span>
+                  <p className="text-xs text-amber-600 dark:text-amber-400 font-medium">— Run Bootstrap to populate the knowledge base</p>
                 )}
               </div>
             )}
+
             {kbQueueRemaining !== null && kbQueueRemaining > 0 && (
               <div className="flex items-center gap-1.5 text-xs bg-amber-50 dark:bg-amber-950/20 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900/40 px-2.5 py-1 rounded-full font-medium">
                 <RefreshCw className="w-3.5 h-3.5 text-amber-500 animate-spin shrink-0" />
@@ -525,22 +506,42 @@ export default function SettingsPage() {
                         <span className="truncate">{kbProgress.memberEmail}</span>
                       </span>
                       <span className="text-slate-500 dark:text-slate-400 shrink-0 ml-3">
-                        {kbProgress.threadsProcessed} / {kbProgress.totalThreads}
+                        {kbProgress.threadsProcessed} / {kbProgress.totalThreads} emails
                       </span>
                     </div>
-                    <div className="w-full bg-violet-100 dark:bg-violet-900/40 rounded-full h-1.5 overflow-hidden">
-                      <div
-                        className="bg-violet-600 h-1.5 rounded-full transition-all duration-200"
-                        style={{
-                          width: kbProgress.totalThreads > 0
-                            ? `${Math.round((kbProgress.threadsProcessed / kbProgress.totalThreads) * 100)}%`
-                            : '0%',
-                        }}
-                      />
+
+                    {/* Dual progress bars: fetched vs KB-indexed */}
+                    <div className="space-y-1.5">
+                      <div className="w-full bg-violet-100 dark:bg-violet-900/40 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className="bg-violet-600 h-1.5 rounded-full transition-all duration-200"
+                          style={{
+                            width: kbProgress.totalThreads > 0
+                              ? `${Math.round((kbProgress.threadsProcessed / kbProgress.totalThreads) * 100)}%`
+                              : '0%',
+                          }}
+                        />
+                      </div>
+                      {kbProgress.threadsProcessed > 0 && (
+                        <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1 overflow-hidden">
+                          <div
+                            className="bg-emerald-500 h-1 rounded-full transition-all duration-200"
+                            style={{ width: `${Math.round((kbProgress.kbIndexed / kbProgress.threadsProcessed) * 100)}%` }}
+                          />
+                        </div>
+                      )}
                     </div>
+
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                      <span className="text-slate-500 dark:text-slate-400">
-                        <strong className="text-violet-600 dark:text-violet-400">{kbProgress.kbIndexed}</strong> KB indexed
+                      <span className="flex items-center gap-1 text-slate-500 dark:text-slate-400">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                        <strong className="text-emerald-600 dark:text-emerald-400">{kbProgress.kbIndexed}</strong>
+                        <span>of {kbProgress.threadsProcessed} added to KB</span>
+                        {kbProgress.threadsProcessed > 0 && (
+                          <span className="text-slate-400">
+                            ({Math.round((kbProgress.kbIndexed / kbProgress.threadsProcessed) * 100)}%)
+                          </span>
+                        )}
                       </span>
                       <span className="text-slate-500 dark:text-slate-400">
                         <strong className="text-slate-700 dark:text-slate-300">{kbProgress.personalAdded}</strong> inbox

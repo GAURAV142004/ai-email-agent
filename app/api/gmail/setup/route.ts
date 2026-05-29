@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getMemberFromSession, getServiceSupabase } from '@/lib/auth'
-import { getGmailClient } from '@/lib/gmail/client'
 import { safeDecrypt } from '@/lib/crypto'
+import { setupGmailWatch } from '@/lib/gmail/watch'
 
 // GET — return current watch status for the authenticated member
 export async function GET(): Promise<NextResponse> {
@@ -45,35 +45,10 @@ export async function POST(): Promise<NextResponse> {
   const accessToken  = safeDecrypt(tokenRow.access_token)
   const refreshToken = tokenRow.refresh_token ? safeDecrypt(tokenRow.refresh_token) : undefined
 
-  try {
-    const gmail = getGmailClient(accessToken, refreshToken)
-
-    const watchRes = await gmail.users.watch({
-      userId: 'me',
-      requestBody: {
-        topicName: process.env.GOOGLE_PUBSUB_TOPIC!,
-        labelIds:  ['INBOX'],
-      },
-    })
-
-    const watchExpiry = watchRes.data.expiration
-      ? new Date(Number(watchRes.data.expiration)).toISOString()
-      : null
-
-    const historyId = watchRes.data.historyId ?? null
-
-    // Persist watch metadata to team_members
-    await supabase
-      .from('team_members')
-      .update({
-        watch_expiry:    watchExpiry,
-        last_history_id: historyId,
-      })
-      .eq('id', member.id)
-
-    return NextResponse.json({ ok: true, watchExpiry, historyId })
-  } catch (err) {
-    console.error('[Gmail Setup] Watch registration failed:', err)
-    return NextResponse.json({ error: 'Failed to set up Gmail watch' }, { status: 500 })
+  const result = await setupGmailWatch(supabase, member.id, accessToken, refreshToken)
+  if (result.ok) {
+    return NextResponse.json({ ok: true, watchExpiry: result.watchExpiry, historyId: result.historyId })
+  } else {
+    return NextResponse.json({ error: result.error ?? 'Failed to set up Gmail watch' }, { status: 500 })
   }
 }

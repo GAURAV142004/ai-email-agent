@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { timingSafeEqual } from 'crypto'
 import { getServiceSupabase } from '@/lib/auth'
-import { google } from 'googleapis'
 import { safeDecrypt } from '@/lib/crypto'
+import { setupGmailWatch } from '@/lib/gmail/watch'
 
 function verifyCronSecret(authHeader: string | null): boolean {
   const secret = process.env.CRON_SECRET
@@ -62,37 +62,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
       if (!accessToken || !refreshToken) continue
 
-      const oauthClient = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET
-      )
-      oauthClient.setCredentials({
-        access_token:  accessToken,
-        refresh_token: refreshToken,
-      })
-
-      const gmail = google.gmail({ version: 'v1', auth: oauthClient })
-      const watchResponse = await gmail.users.watch({
-        userId: 'me',
-        requestBody: {
-          labelIds: ['INBOX'],
-          topicName: process.env.GOOGLE_PUBSUB_TOPIC!,
-        },
-      })
-
-      const newExpiry = new Date(
-        Number(watchResponse.data.expiration)
-      ).toISOString()
-
-      await supabase
-        .from('team_members')
-        .update({
-          watch_expiry:    newExpiry,
-          last_history_id: watchResponse.data.historyId ?? null,
-        })
-        .eq('id', member.id)
-
-      renewed++
+      const result = await setupGmailWatch(supabase, member.id, accessToken, refreshToken)
+      if (result.ok) {
+        renewed++
+      } else {
+        errors.push(`${member.email}: ${result.error}`)
+      }
     } catch (err: any) {
       errors.push(`${member.email}: ${err.message}`)
     }

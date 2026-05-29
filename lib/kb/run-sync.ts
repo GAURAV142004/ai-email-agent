@@ -158,6 +158,7 @@ export async function runKBSync(params: SyncParams = {}): Promise<SyncResult> {
               memberId:       member.id,
               gmailThreadId:  threadId,
               gmailMessageId: firstMsgId,
+              latestMessageId: thread.messages[thread.messages.length - 1]?.messageId ?? firstMsgId,
               fromEmail,
               toEmail:        member.email,
               toEmails:       thread.toEmails,   // NEW: full To header recipients

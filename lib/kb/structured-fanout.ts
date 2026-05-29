@@ -34,6 +34,12 @@ export async function fanOutToStructuredTables(
     ? await resolveMentionedNamesToMembers(supabase, allMentionedNames)
     : new Map<string, string>()
 
+  // Clear existing items for this KB entry to prevent duplicates or stale records during updates
+  await supabase
+    .from('project_operational_items')
+    .delete()
+    .eq('source_kb_entry_id', kbEntryId)
+
   const rowsToInsert: any[] = []
 
   // ── 1. Action Items ────────────────────────────────────────────────────────

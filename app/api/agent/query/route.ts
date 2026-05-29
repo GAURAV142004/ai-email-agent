@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse }               from 'next/server'
+import { NextRequest, NextResponse, after }         from 'next/server'
 import { getConsentedMember, getServiceSupabase }  from '@/lib/auth'
 import { checkKBAccess, checkResponseSafety }      from '@/lib/compliance/access-guard'
 import { logKBQuery }                              from '@/lib/compliance/audit-logger'
@@ -21,6 +21,7 @@ import {
 } from '@/lib/kb/project-fetch'
 import { searchAttachments }                       from '@/lib/kb/search'
 import { getSemanticCache, setSemanticCache }       from '@/lib/kb/cache-service'
+import { runKBSync }                               from '@/lib/kb/run-sync'
 
 const bedrock = new BedrockRuntimeClient({
   region: process.env.AWS_REGION ?? 'ap-south-1',
@@ -85,26 +86,70 @@ const wantsFile = (t: string) => FILE_RX.some(p => p.test(t))
 
 // ── Obvious personal-question pre-filter ─────────────────────────────────────
 // Catches the most blatant personal queries before any KB lookup or AI call.
-// These keywords are almost exclusively personal in intent when used in a
-// question context, so the false-positive risk is extremely low.
 const OBVIOUS_PERSONAL_RX = [
-  /\b(salary|ctc|cost.?to.?company|compensation|stipend|take.?home|remuneration)\b/i,
+  // Financial / compensation
+  /\b(salary|ctc|cost.?to.?company|compensation|stipend|take.?home|remuneration|pay.?slip|payroll|bonus|hike|appraisal|increment)\b/i,
   /\bwhat\s+(does|did|is|was)\b.{0,30}\b(earn|make|paid|getting|drawing|taking home)\b/i,
   /\bhow much\s+(does|did|is|was)\b.{0,30}\b(earn|make|paid|get paid|drawing)\b/i,
+  // Age / demographics
   /\bhow old\s+(is|was|are)\b/i,
   /\bwhat.*\b(his|her|their)\s+age\b/i,
-  /\bwhere\s+(does|do|did|is|was)\b.{0,30}\b(live|stay|reside|based|located)\b/i,
-  /\b(home address|residential address|personal address|house address)\b/i,
-  /\b(hobbies|personal interests|lifestyle|habits)\b.{0,30}\b(of|his|her|their)\b/i,
-  /\b(his|her|their)\s+(hobbies|interests|lifestyle|habits|passions)\b/i,
-  /\bwhat\s+(religion|caste|community)\b/i,
-  /\b(his|her|their)\s+(religion|caste|community|faith)\b/i,
-  /\b(his|her|their)\s+(family|kids|children|wife|husband|girlfriend|boyfriend|parents|siblings)\b/i,
-  /\b(does|did)\s+\w+\s+(have|has)\s+(kids|children|a wife|a husband|siblings)\b/i,
+  /\b(date of birth|dob|born on|year of birth)\b/i,
+  // Address / location (personal)
+  /\bwhere\s+(does|do|did|is|was)\b.{0,30}\b(live|stay|reside|based|located|stay at)\b/i,
+  /\b(home address|residential address|personal address|house address|current address)\b/i,
+  // Relationships / family
+  /\b(his|her|their)\s+(family|kids|children|wife|husband|girlfriend|boyfriend|parents|siblings|spouse|partner|son|daughter)\b/i,
+  /\b(does|did)\s+\w+\s+(have|has)\s+(kids|children|a wife|a husband|siblings|a partner|a girlfriend|a boyfriend)\b/i,
+  /\b(married|single|divorced|separated|widowed|engaged|in a relationship)\b.{0,20}\b(is|was|are|were)\b/i,
+  // Lifestyle / personal traits
+  /\b(hobbies|personal interests|lifestyle|habits|passions|habits)\b.{0,30}\b(of|his|her|their)\b/i,
+  /\b(his|her|their)\s+(hobbies|interests|lifestyle|habits|passions|personality|character|attitude)\b/i,
   /\btell me (something )?(personal|private) about\b/i,
   /\bwhat (do you know|can you tell me|is there) about\s+(him|her|them)\b/i,
+  // Religion / identity
+  /\bwhat\s+(religion|caste|community|faith|sect|denomination|political view)\b/i,
+  /\b(his|her|their)\s+(religion|caste|community|faith|political|nationality|ethnicity|race)\b/i,
+  // Health / medical
+  /\b(health|medical|illness|disease|diagnosis|medication|treatment|therapy|doctor|hospital|surgery|disability)\b.{0,20}\b(of|his|her|their|about)\b/i,
+  /\b(his|her|their)\s+(health|medical condition|mental health|illness|sick|doctor visit)\b/i,
+  // Personal opinions / attitudes
+  /\bwhat does\s+\w+\s+think (about|of)\b.{0,40}\b(personally|his opinion|her opinion)\b/i,
+  /\b(his|her|their)\s+(opinion|view|stance|perspective|attitude|feelings?)\s+(on|about|towards)\b.{0,30}\b(personally|life|politics|religion)\b/i,
 ]
 const isObviousPersonalQuery = (t: string) => OBVIOUS_PERSONAL_RX.some(p => p.test(t))
+
+// ── AI-based personal query classifier (secondary check) ─────────────────────
+// Fires only when the regex pre-filter doesn't catch something, but the
+// question still looks like it might be personal based on keyword heuristics.
+const PERSONAL_KEYWORD_HINTS = [
+  /\b(personal|private|confidential|sensitive)\b/i,
+  /\b(his|her|their|about him|about her)\b/i,
+  /\b(character|personality|attitude|behavior|conduct|manner)\b/i,
+  /\b(opinion|belief|view|stance|feeling|emotion)\b/i,
+]
+const mightBePersonal = (t: string) => PERSONAL_KEYWORD_HINTS.some(p => p.test(t))
+
+// Classify using AI when regex hints suggest personal intent but aren't definitive
+async function aiClassifyPersonal(question: string): Promise<boolean> {
+  try {
+    const body = JSON.stringify({
+      messages: [{ role: 'user', content: [{ text:
+        `Is this question asking for personal/private information about an individual (e.g. their personal life, health, family, salary, religion, personal opinions unrelated to work)? Answer ONLY "yes" or "no".\n\nQuestion: "${question.slice(0, 400)}"` }] }],
+      system: [{ text: 'You are a classifier. Answer ONLY "yes" or "no". No explanation.' }],
+      inferenceConfig: { maxTokens: 5, temperature: 0 },
+    })
+    const resp = await bedrock.send(new InvokeModelCommand({
+      modelId: MODEL_ID, contentType: 'application/json',
+      accept: 'application/json', body: Buffer.from(body),
+    }))
+    const parsed = JSON.parse(Buffer.from(resp.body).toString('utf-8'))
+    const answer = parsed.output?.message?.content?.[0]?.text?.trim().toLowerCase() ?? ''
+    return answer.startsWith('yes')
+  } catch {
+    return false
+  }
+}
 
 // ── Bedrock call wrapper ──────────────────────────────────────────────────────
 async function callAI(
@@ -170,6 +215,15 @@ ${projectScope}
 - You may only state what the KB data directly supports.
 - When you cite a fact, mention the project name and approximate date.
 
+=== QUERY ANALYSIS — CRITICAL ===
+Before answering, analyze the user's question:
+1. Is this a single focused question or multiple questions mixed together?
+2. If the question is about ONE specific aspect (e.g., "what is the status of X"), answer ONLY that.
+3. If the question appears to span multiple UNRELATED topics or projects, DO NOT merge all answers.
+   Instead, respond: "Your question seems to cover multiple topics. Could you clarify which specific
+   aspect you'd like me to focus on first?" and list the topics you detected.
+4. NEVER combine responses for different projects without clearly labeling each section.
+
 === INTENT UNDERSTANDING ===
 - Understand natural language intent: "What's cooking with Infosys?" = Infosys project status.
 - Resolve references ("that task", "them", "it") using CONVERSATION HISTORY.
@@ -179,7 +233,7 @@ ${projectScope}
 === RESPONSE FORMAT ===
 - Simple fact → 1–3 sentences.
 - Multiple items → bullet list; action items: owner → task → due date.
-- Multi-project overview → group by project name as ## headers.
+- Multi-project overview → group by project name as ## headers (NEVER mix them).
 - No openers: "Certainly!", "Great question!", "Sure!".
 - No closers: "Hope this helps!", "Feel free to ask!", "Let me know!".
 - No filler: "In summary", "Overall", "Moving forward".
@@ -198,10 +252,11 @@ including but not limited to:
   • Relationships (married/single/divorced/dating/family)
   • Hobbies, lifestyle, personal interests, or habits
   • Religion, caste, community, or faith
+  • Personal opinions, beliefs, or attitudes unrelated to project work
   • Any private or personal attribute of a team member
 
 When a personal question is detected, respond with EXACTLY this message and nothing else:
-"I'm only able to assist with project-related questions. Personal information about team members is outside the scope of this system."
+"⚠️ This question asks for personal information about a team member, which is outside the scope of this system. I only assist with project-related queries — tasks, deadlines, decisions, and work deliverables."
 
 Do NOT say "I don't have that in the knowledge base" for personal questions — that
 implies the data might exist. Use the exact refusal text above instead.${fileBlock}`
@@ -222,36 +277,32 @@ implies the data might exist. Use the exact refusal text above instead.${fileBlo
 }
 
 // ── Smart clarifying question generator ──────────────────────────────────────
-// The AI asks a well-formed clarifying question when it can't confidently
-// determine which project the user is asking about.
-// Only fires when BOTH conditions are true:
-//   1. Query is ambiguous (no project detected in query OR history)
-//   2. Multiple projects exist in the KB (otherwise there's no ambiguity)
-
 function buildClarifyingQuestionResponse(
   question:         string,
   availableClusters: ProjectCluster[],
   history:           HistoryMsg[],
 ): string {
   const projectList = availableClusters
-    .slice(0, 8)   // cap at 8 so the question stays concise
-    .map(c => `• **${c.name}** (${c.entryCount} email${c.entryCount !== 1 ? 's' : ''})`)
+    .slice(0, 8)
+    .map(c => `• **${c.name}** (${c.entryCount} email${c.entryCount !== 1 ? 's' : ''} in KB)`)
     .join('\n')
 
-  // Tailor the question based on what the user asked
   const qLower    = question.toLowerCase()
   const wantsWhat = qLower.includes('status')   ? 'status'
     : qLower.includes('action') || qLower.includes('task') ? 'action items'
     : qLower.includes('risk')   || qLower.includes('blocker') ? 'risks/blockers'
     : qLower.includes('update')                  ? 'updates'
+    : qLower.includes('deadline') || qLower.includes('due') ? 'deadlines'
+    : qLower.includes('client')                  ? 'client communication'
+    : qLower.includes('decision')                ? 'decisions'
     : 'information'
 
   const hasHistory = history.length > 0
   const prefix     = hasHistory
-    ? 'I want to make sure I pull from the right project knowledge base.'
-    : "I can see you're asking about project " + wantsWhat + '.'
+    ? 'To give you the most accurate answer, I need to know which project you\'re asking about.'
+    : `I can see you\'re asking about project **${wantsWhat}**.`
 
-  return `${prefix} Which project are you referring to?\n\n${projectList}\n\nJust mention the project name (or part of it) and I'll fetch the full knowledge base for it.`
+  return `${prefix} Which project are you referring to?\n\n${projectList}\n\nJust click the project name below, or type it and I'll pull the relevant knowledge base.`
 }
 
 // ── Decide whether to ask a clarifying question ───────────────────────────────
@@ -320,8 +371,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (question.length > 2000) return NextResponse.json({ error: 'Question too long' }, { status: 400 })
 
   // ── Fix 4: Obvious personal-question pre-filter ─────────────────────────────
-  // Block the most blatant personal queries immediately, before any DB/AI work.
-  // This ensures they get a 🚫 compliance alert + audit log, not a "not in KB" reply.
   if (isObviousPersonalQuery(question)) {
     const supabaseEarly = getServiceSupabase()
     await logKBQuery(supabaseEarly, {
@@ -332,7 +381,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       personalTopicsFound: ['obvious_personal_intent'],
     })
     return NextResponse.json({
-      answer: '🚫 Compliance Block: This question asks for personal information about a team member (e.g. salary, location, age, relationships, hobbies, religion). Personal attributes are strictly outside the scope of the project knowledge base. This attempt has been logged.',
+      answer: '🚫 **Out of Scope — Personal Query Detected**\n\nThis question asks for personal information about a team member (such as salary, location, age, relationships, hobbies, health, or religion). Personal attributes are strictly outside the scope of the project knowledge base.\n\nI can help you with:\n• Project status and progress\n• Action items and deadlines\n• Client communications and decisions\n• Blockers and risks\n• Team deliverables\n\nThis query has been logged for compliance auditing.',
       wasBlocked: true,
       responseType: 'text',
       kbEntriesUsed: 0,
@@ -340,6 +389,32 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       projectClusterDetails: [],
       tokensUsed: 0,
     })
+  }
+
+  // ── Secondary personal check via AI (for borderline cases) ─────────────────
+  // Only fires when the question contains hint keywords but wasn't caught by regex.
+  // Uses Nova micro with just 5 tokens — extremely cheap and fast.
+  if (mightBePersonal(question)) {
+    const isPersonalAI = await aiClassifyPersonal(question)
+    if (isPersonalAI) {
+      const supabaseEarly = getServiceSupabase()
+      await logKBQuery(supabaseEarly, {
+        queriedBy: member.id,
+        queryText: question,
+        wasBlocked: true,
+        blockReason: 'ai_personal_query_classifier',
+        personalTopicsFound: ['ai_detected_personal_intent'],
+      })
+      return NextResponse.json({
+        answer: '⚠️ **Personal Query Detected**\n\nYour question appears to be asking for personal information about an individual, which is outside the scope of this project knowledge assistant.\n\nI\'m designed to help with work-related project knowledge only — tasks, deadlines, decisions, blockers, and deliverables. If you believe this was classified incorrectly, please rephrase your question to focus on a specific project or work item.',
+        wasBlocked: true,
+        responseType: 'text',
+        kbEntriesUsed: 0,
+        projectClusters: [],
+        projectClusterDetails: [],
+        tokensUsed: 0,
+      })
+    }
   }
 
   const supabase = getServiceSupabase()
@@ -738,6 +813,28 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     queriedBy: member.id, queryText: question, queryAboutMemberId: mentioned?.id,
     wasBlocked: !safety.allowed, kbEntriesAccessed: totalEntries,
     projectClustersHit: projectNames, responseType: respType,
+  })
+
+  // Trigger throttled background sync asynchronously
+  after(async () => {
+    try {
+      const supabaseAdmin = getServiceSupabase()
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString()
+      const { count } = await supabaseAdmin
+        .from('kb_sync_jobs')
+        .select('id', { count: 'exact', head: true })
+        .gt('started_at', twoMinutesAgo)
+
+      if (count && count > 0) {
+        console.log('[Agent Query] Background KB sync throttled (recent sync exists).')
+        return
+      }
+
+      console.log('[Agent Query] Triggering background KB sync post-query...')
+      await runKBSync()
+    } catch (err) {
+      console.error('[Agent Query] Background KB sync failed:', err)
+    }
   })
 
   return NextResponse.json({

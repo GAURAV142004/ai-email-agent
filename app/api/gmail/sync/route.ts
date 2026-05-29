@@ -99,6 +99,7 @@ export async function POST(): Promise<NextResponse> {
           memberId:       member.id,
           gmailThreadId:  threadId,
           gmailMessageId: firstMsgId,
+          latestMessageId: thread.messages[thread.messages.length - 1]?.messageId ?? firstMsgId,
           fromEmail,
           toEmail:        member.email,
           toEmails:       thread.toEmails,

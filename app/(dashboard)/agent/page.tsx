@@ -75,12 +75,33 @@ function AssistantBubble({
   }
 
   if (msg.was_blocked) {
+    const content = msg.content || msg.block_reason || 'This response was blocked.'
+    const isSoftWarning = content.includes('\u26a0\ufe0f') || content.includes('Personal Query Detected')
+    const isHardBlock   = content.includes('\ud83d\udeab') || content.includes('Out of Scope') || content.includes('Compliance Block')
     return (
-      <div className="flex items-start gap-2 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl">
-        <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-        <p className="text-sm text-amber-700 dark:text-amber-300">
-          {msg.block_reason ?? 'This response was blocked.'}
-        </p>
+      <div className={`flex items-start gap-3 p-4 rounded-xl border ${
+        isSoftWarning
+          ? 'bg-amber-50 dark:bg-amber-900/15 border-amber-200 dark:border-amber-700/50'
+          : 'bg-red-50 dark:bg-red-900/15 border-red-200 dark:border-red-700/50'
+      }`}>
+        <div className={`mt-0.5 shrink-0 w-5 h-5 rounded-full flex items-center justify-center ${
+          isSoftWarning ? 'bg-amber-100 dark:bg-amber-800/30' : 'bg-red-100 dark:bg-red-800/30'
+        }`}>
+          <AlertTriangle className={`w-3 h-3 ${isSoftWarning ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'}`} />
+        </div>
+        <div className="flex-1 min-w-0">
+          {isHardBlock && (
+            <p className="text-xs font-semibold text-red-700 dark:text-red-300 uppercase tracking-wide mb-1.5">
+              Access Restricted
+            </p>
+          )}
+          <div
+            className={`text-sm leading-relaxed ${
+              isSoftWarning ? 'text-amber-800 dark:text-amber-200' : 'text-red-800 dark:text-red-200'
+            }`}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+          />
+        </div>
       </div>
     )
   }

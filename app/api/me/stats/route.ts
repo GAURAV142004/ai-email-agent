@@ -1,5 +1,6 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { getMemberFromSession, getServiceSupabase } from '@/lib/auth'
+import { runKBSync } from '@/lib/kb/run-sync'
 
 export async function GET(): Promise<NextResponse> {
   const member = await getMemberFromSession()
@@ -45,18 +46,34 @@ export async function GET(): Promise<NextResponse> {
   // KB sync status
   const { data: lastSync } = await supabase
     .from('kb_sync_jobs')
-    .select('status, completed_at, kb_entries_added, errors')
+    .select('status, completed_at, kb_entries_added, emails_processed, errors')
     .eq('member_id', member.id)
     .eq('status', 'completed')
     .order('completed_at', { ascending: false })
     .limit(1)
     .single()
 
-  // Total KB entries for this member
+  // Total KB entries visible to this member (owned or participated)
   const { count: kbCount } = await supabase
     .from('email_knowledge_base')
     .select('id', { count: 'exact', head: true })
-    .eq('owner_member_id', member.id)
+    .or(`owner_member_id.eq.${member.id},participant_member_ids.cs.{${member.id}}`)
+
+  // Total emails fetched (threads evaluated) from last completed sync job
+  const lastSyncJob = lastSync as any
+  const lastEmailsFetched: number = lastSyncJob?.emails_processed ?? 0
+  const lastKbAdded:      number = lastSyncJob?.kb_entries_added ?? 0
+
+  // All-time emails fetched across all sync jobs for this member
+  const { data: allSyncJobs } = await supabase
+    .from('kb_sync_jobs')
+    .select('emails_processed, kb_entries_added')
+    .eq('member_id', member.id)
+    .eq('status', 'completed')
+
+  const totalEmailsFetched = (allSyncJobs ?? []).reduce(
+    (sum: number, j: any) => sum + (j.emails_processed ?? 0), 0
+  )
 
   // Pending items in bootstrap queue for this member
   const { count: queueCount } = await supabase
@@ -65,15 +82,39 @@ export async function GET(): Promise<NextResponse> {
     .eq('member_id', member.id)
     .in('status', ['pending', 'processing'])
 
+  // Trigger throttled background sync asynchronously
+  after(async () => {
+    try {
+      const supabaseAdmin = getServiceSupabase()
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString()
+      const { count } = await supabaseAdmin
+        .from('kb_sync_jobs')
+        .select('id', { count: 'exact', head: true })
+        .gt('started_at', twoMinutesAgo)
+
+      if (count && count > 0) {
+        console.log('[Stats GET] Background KB sync throttled (recent sync exists).')
+        return
+      }
+
+      console.log('[Stats GET] Triggering background KB sync post-stats-load...')
+      await runKBSync()
+    } catch (err) {
+      console.error('[Stats GET] Background KB sync failed:', err)
+    }
+  })
+
   return NextResponse.json({
     inbox:   inboxStats,
     todos:   todoStats,
     kbSync:  {
-      lastSyncAt:       lastSync?.completed_at ?? null,
-      lastEntriesAdded: lastSync?.kb_entries_added ?? 0,
-      lastSyncErrors:   (lastSync?.errors as string[] | null) ?? [],
-      totalKBEntries:   kbCount ?? 0,
-      queueRemaining:   queueCount ?? 0,
+      lastSyncAt:          lastSync?.completed_at ?? null,
+      lastEntriesAdded:    lastKbAdded,
+      lastEmailsFetched:   lastEmailsFetched,
+      lastSyncErrors:      (lastSync?.errors as string[] | null) ?? [],
+      totalKBEntries:      kbCount ?? 0,
+      totalEmailsFetched,
+      queueRemaining:      queueCount ?? 0,
     },
   })
 }

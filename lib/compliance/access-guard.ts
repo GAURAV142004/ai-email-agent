@@ -16,16 +16,7 @@ export interface AccessCheckResult {
  * These are intentionally broad because the query is already scoped to a
  * specific person (targetMemberRole is set), so false positives are low.
  */
-const NAMED_PERSON_PERSONAL_RX =
-  /\b(salary|ctc|package|compensation|stipend|earn|income|pay\b|remuneration|
-    age\b|how old|date of birth|dob|birthday|birthdate|
-    address|home|house|flat|residence|stay|live|reside|located|from\b|hometown|city\b|
-    phone|mobile|contact number|personal email|
-    hobbies|interests|lifestyle|habits|passion|
-    married|single|divorced|relationship|family|kids|children|wife|husband|girlfriend|boyfriend|
-    health|sick|ill|medical|hospital|leave|absent|
-    religion|caste|community|faith|sect|
-    personal|private|background)\b/i
+const NAMED_PERSON_PERSONAL_RX = /\b(salary|ctc|package|compensation|stipend|earn|income|remuneration|age|how old|date of birth|dob|birthday|birthdate|address|home|house|flat|residence|stay|live|reside|located|hometown|city|phone|mobile|contact number|personal email|hobbies|interests|lifestyle|habits|passion|married|single|divorced|relationship|family|kids|children|wife|husband|girlfriend|boyfriend|health|sick|ill|medical|hospital|leave|absent|religion|caste|community|faith|sect|personal|private|background)\b/i
 
 /**
  * Two-layer compliance check for every KB chatbot query:
